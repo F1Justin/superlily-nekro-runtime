@@ -10,6 +10,10 @@ class SandboxCodeExtData(BaseModel):
     token_consumption: int
     token_input: int
     token_output: int
+    token_cached: int = 0
+    token_cache_write: int = 0
+    usage_cost: float = 0
+    cache_discount: float = 0
     chars_count_input: int
     chars_count_output: int
     chars_count_total: int
@@ -57,6 +61,10 @@ class SandboxCodeExtData(BaseModel):
             token_consumption=llm_response.token_consumption,
             token_input=llm_response.token_input,
             token_output=llm_response.token_output,
+            token_cached=llm_response.token_cached,
+            token_cache_write=llm_response.token_cache_write,
+            usage_cost=llm_response.usage_cost,
+            cache_discount=llm_response.cache_discount,
             chars_count_input=chars_count_input,
             chars_count_output=chars_count_output,
             chars_count_total=chars_count_total,

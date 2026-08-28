@@ -89,8 +89,8 @@ fi
 # 频道沙盒活跃时间记录表
 chat_key_sandbox_map: Dict[str, float] = {}
 
-# 频道沙盒容器记录表
-chat_key_sandbox_container_map: Dict[str, DockerContainer] = {}
+# 频道沙盒容器记录表。容器对象不能活得比创建它的 Docker client 更久。
+chat_key_sandbox_container_map: Dict[str, str] = {}
 
 # 频道清理任务记录表
 chat_key_sandbox_cleanup_task_map: Dict[str, asyncio.Task] = {}
@@ -192,24 +192,26 @@ async def run_code_in_sandbox(
             logger.error(f"清理过期任务失败: {e}")
         del chat_key_sandbox_cleanup_task_map[from_chat_key]
 
-    # 清理过期沙盒
-    if from_chat_key in chat_key_sandbox_container_map:
-        try:
-            await chat_key_sandbox_container_map[from_chat_key].delete()
-            logger.debug(f"清理过期沙盒: {from_chat_key} | {container_name}")
-        except Exception as e:
-            if "404" in str(e):
-                logger.debug(f"沙盒容器已不存在: {from_chat_key} | {container_name}")
-            else:
-                logger.error(f"清理过期沙盒失败: {e}")
-        del chat_key_sandbox_container_map[from_chat_key]
-
     # 启动容器
     # 使用 try/finally 确保 Docker 客户端（及其底层 aiohttp UnixConnector）在使用后被正确关闭，
     # 防止连接泄漏导致连接池耗尽后 docker.containers.run() 永久挂起
     docker = aiodocker.Docker()
+    container: Optional[DockerContainer] = None
+    container_id: Optional[str] = None
+    execution_returned = False
     try:
-        container: DockerContainer = await docker.containers.run(
+        stale_container_id = chat_key_sandbox_container_map.pop(from_chat_key, None)
+        if stale_container_id:
+            try:
+                await docker.containers.container(stale_container_id).delete(force=True)
+                logger.debug(f"清理过期沙盒: {from_chat_key} | {stale_container_id}")
+            except Exception as e:
+                if "404" in str(e):
+                    logger.debug(f"沙盒容器已不存在: {from_chat_key} | {stale_container_id}")
+                else:
+                    logger.error(f"清理过期沙盒失败: {e}")
+
+        container = await docker.containers.run(
             name=container_name,
             config={
                 "Image": IMAGE_NAME,
@@ -238,15 +240,22 @@ async def run_code_in_sandbox(
                 "AutoRemove": True,
             },
         )
-        chat_key_sandbox_container_map[from_chat_key] = container
-        logger.debug(f"启动容器: {container_name} | ID: {container.id}")
+        container_id = container.id
+        chat_key_sandbox_container_map[from_chat_key] = container_id
+        logger.debug(f"启动容器: {container_name} | ID: {container_id}")
 
         # 获取输出和退出类型
         output_text, stop_type = await run_container_with_timeout(
             container,
             config.SANDBOX_RUNNING_TIMEOUT,
         )
+        execution_returned = True
     finally:
+        if container_id and chat_key_sandbox_container_map.get(from_chat_key) == container_id:
+            chat_key_sandbox_container_map.pop(from_chat_key, None)
+        if container_id and not execution_returned:
+            with contextlib.suppress(Exception):
+                await docker.containers.container(container_id).delete(force=True)
         await docker.close()
 
     # 记录执行耗时
@@ -258,15 +267,13 @@ async def run_code_in_sandbox(
 
     # 沙盒共享目录超过 30 分钟未活动，则自动清理
     async def cleanup_container_shared_dir(box_last_active_time):
-        nonlocal from_chat_key, container
+        nonlocal from_chat_key
         await asyncio.sleep(30 * 60)
         if box_last_active_time == chat_key_sandbox_map.get(from_chat_key):
             try:
                 shutil.rmtree(host_shared_dir)
             except Exception as e:
                 logger.error(f"清理容器共享目录时发生错误: {e}")
-            with contextlib.suppress(Exception):
-                await container.delete()  # 清理沙盒
 
     box_last_active_time = time.time()
     chat_key_sandbox_map[from_chat_key] = box_last_active_time

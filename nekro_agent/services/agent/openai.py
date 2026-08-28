@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import time
 from datetime import datetime
@@ -14,6 +15,7 @@ from typing import (
     Optional,
     Union,
 )
+from urllib.parse import urlparse
 
 import aiofiles
 import httpx
@@ -56,6 +58,10 @@ class OpenAIResponse(BaseModel):
     token_consumption: int  # 总 token 消耗
     token_input: int  # 输入 token 消耗
     token_output: int  # 输出 token 消耗
+    token_cached: int = 0  # 缓存读取 token
+    token_cache_write: int = 0  # 缓存写入 token
+    usage_cost: float = 0  # 供应商返回的实际费用
+    cache_discount: float = 0  # 供应商返回的缓存折扣
     use_model: str  # 使用的模型
     speed_tokens_per_second: float  # token 生成速度 / 秒
     first_token_cost_ms: int  # 首 token 生成时间
@@ -71,6 +77,9 @@ class OpenAIResponse(BaseModel):
                 f"总 token 消耗: {self.token_consumption}\n"
                 f"输入 token: {self.token_input}\n"
                 f"输出 token: {self.token_output}\n"
+                f"缓存读取 token: {self.token_cached}\n"
+                f"缓存写入 token: {self.token_cache_write}\n"
+                f"实际费用: {self.usage_cost}\n"
                 f"总生成时间: {self.generation_time_ms}ms\n"
                 f"生成速度: {self.speed_tokens_per_second} tokens/s\n"
                 f"首 token 生成时间: {self.first_token_cost_ms}ms\n"
@@ -80,6 +89,9 @@ class OpenAIResponse(BaseModel):
             f"Total token consumption: {self.token_consumption}\n"
             f"Input token: {self.token_input}\n"
             f"Output token: {self.token_output}\n"
+            f"Cached token: {self.token_cached}\n"
+            f"Cache write token: {self.token_cache_write}\n"
+            f"Actual cost: {self.usage_cost}\n"
             f"Total generation time: {self.generation_time_ms}ms\n"
             f"Token generation speed: {self.speed_tokens_per_second} tokens/s\n"
             f"First token cost: {self.first_token_cost_ms}ms\n"
@@ -109,6 +121,10 @@ class OpenAIResponse(BaseModel):
                 "token_consumption": self.token_consumption,
                 "token_input": self.token_input,
                 "token_output": self.token_output,
+                "token_cached": self.token_cached,
+                "token_cache_write": self.token_cache_write,
+                "usage_cost": self.usage_cost,
+                "cache_discount": self.cache_discount,
                 "generation_time_ms": self.generation_time_ms,
                 "speed_tokens_per_second": self.speed_tokens_per_second,
                 "first_token_cost_ms": self.first_token_cost_ms,
@@ -413,13 +429,21 @@ async def gen_openai_chat_response(
     log_path: Optional[Union[str, Path]] = None,
     error_log_path: Optional[Union[str, Path]] = None,
     log_style: Literal["json", "text", "auto"] = "auto",
+    session_id: Optional[str] = None,
 ) -> OpenAIResponse:
     """生成聊天回复内容"""
 
     _start_time: float = time.time()
 
-    # messages 处理
-    messages = [msg.to_dict() if isinstance(msg, OpenAIChatMessage) else msg for msg in messages]
+    normalized_host = (urlparse(base_url).hostname or "").lower() if base_url else ""
+    is_openrouter = normalized_host == "openrouter.ai" or normalized_host.endswith(".openrouter.ai")
+    use_explicit_gemini_cache = is_openrouter and "gemini" in model.lower()
+
+    # Gemini prompt caching on OpenRouter requires an explicit breakpoint.
+    messages = [
+        msg.to_dict(include_cache_control=use_explicit_gemini_cache) if isinstance(msg, OpenAIChatMessage) else msg
+        for msg in messages
+    ]
 
     # Parse extra_body if it is a string
     if isinstance(extra_body, str):
@@ -440,17 +464,25 @@ async def gen_openai_chat_response(
             gen_kwargs["extra_body"] = {}
         gen_kwargs["extra_body"]["top_k"] = top_k
 
+    if is_openrouter and session_id:
+        if gen_kwargs["extra_body"] is None:
+            gen_kwargs["extra_body"] = {}
+        metadata = dict(gen_kwargs["extra_body"].get("metadata") or {})
+        metadata.setdefault("session_id", f"nekro-{hashlib.sha256(session_id.encode()).hexdigest()[:32]}")
+        gen_kwargs["extra_body"]["metadata"] = metadata
+
     # 去掉所有值为None的键
     gen_kwargs = {key: value for key, value in gen_kwargs.items() if value is not None}
-
-    # messages 处理
-    messages = [msg.to_dict() if isinstance(msg, OpenAIChatMessage) else msg for msg in messages]
 
     output: str = ""
     thought_chain: str = ""
     token_consumption: int = 0
     token_input: int = 0
     token_output: int = 0
+    token_cached: int = 0
+    token_cache_write: int = 0
+    usage_cost: float = 0
+    cache_discount: float = 0
     first_token_time: Optional[float] = None
 
     def _extract_valid_delta(chunk: ChatCompletionChunk) -> Optional[Any]:
@@ -463,8 +495,35 @@ async def gen_openai_chat_response(
             return None
         return delta
 
+    def _usage_value(source: Any, field: str, default: Any = 0) -> Any:
+        if source is None:
+            return default
+        if isinstance(source, dict):
+            return source.get(field, default)
+        value = getattr(source, field, None)
+        if value is not None:
+            return value
+        model_extra = getattr(source, "model_extra", None)
+        return model_extra.get(field, default) if isinstance(model_extra, dict) else default
+
+    def _apply_usage(usage: Any) -> None:
+        nonlocal token_consumption, token_input, token_output, token_cached, token_cache_write
+        nonlocal usage_cost, cache_discount
+        if not usage:
+            return
+        token_consumption = int(_usage_value(usage, "total_tokens", token_consumption) or 0)
+        token_input = int(_usage_value(usage, "prompt_tokens", token_input) or 0)
+        token_output = int(_usage_value(usage, "completion_tokens", token_output) or 0)
+        prompt_details = _usage_value(usage, "prompt_tokens_details", None)
+        token_cached = int(_usage_value(prompt_details, "cached_tokens", token_cached) or 0)
+        token_cache_write = int(_usage_value(prompt_details, "cache_write_tokens", token_cache_write) or 0)
+        usage_cost = float(_usage_value(usage, "cost", usage_cost) or 0)
+        cache_discount = float(_usage_value(usage, "cache_discount", cache_discount) or 0)
+
     async def _apply_stream_chunk(chunk: ChatCompletionChunk) -> bool:
-        nonlocal output, thought_chain, token_consumption, token_input, token_output, first_token_time
+        nonlocal output, thought_chain, first_token_time
+
+        _apply_usage(chunk.usage)
 
         delta = _extract_valid_delta(chunk)
         if delta is None:
@@ -478,14 +537,6 @@ async def gen_openai_chat_response(
             output += chunk_text
         current_thought_chain = getattr(delta, thought_chain_field_name, "") or ""
         thought_chain += current_thought_chain
-
-        if chunk.usage:
-            if chunk.usage.total_tokens is not None:
-                token_consumption = chunk.usage.total_tokens
-            if chunk.usage.prompt_tokens is not None:
-                token_input = chunk.usage.prompt_tokens
-            if chunk.usage.completion_tokens is not None:
-                token_output = chunk.usage.completion_tokens
 
         if chunk_callback and await chunk_callback(
             OpenAIStreamChunk(
@@ -567,9 +618,7 @@ async def gen_openai_chat_response(
 
                 output = res.choices[0].message.content
                 thought_chain = getattr(res.choices[0].message, thought_chain_field_name, "") or ""
-                token_consumption = res.usage.total_tokens if res.usage else 0
-                token_input = res.usage.prompt_tokens if res.usage else 0
-                token_output = res.usage.completion_tokens if res.usage else 0
+                _apply_usage(res.usage)
 
     except Exception as e:
         logger.exception(f"OpenAI请求失败: {e}")
@@ -605,6 +654,10 @@ async def gen_openai_chat_response(
         token_consumption=token_consumption,
         token_input=token_input,
         token_output=token_output,
+        token_cached=token_cached,
+        token_cache_write=token_cache_write,
+        usage_cost=usage_cost,
+        cache_discount=cache_discount,
         use_model=model,
         speed_tokens_per_second=_speed_tokens_per_second,
         first_token_cost_ms=_first_token_cost_ms or 0,

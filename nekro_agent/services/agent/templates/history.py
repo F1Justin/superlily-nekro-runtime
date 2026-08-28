@@ -463,6 +463,21 @@ class HistoryPrompt(PromptTemplate):
     lunar_time: str
 
 
+def _select_recent_chat_messages(
+    messages_newest_first: List[DBChatMessage],
+    max_length: int,
+    referenced_message: Optional[DBChatMessage],
+) -> List[DBChatMessage]:
+    if max_length <= 0:
+        return []
+
+    selected = messages_newest_first[::-1][-max_length:]
+    if referenced_message and max_length >= 2 and all(msg.id != referenced_message.id for msg in selected):
+        selected = [referenced_message, *selected[-(max_length - 1) :]]
+        selected.sort(key=lambda msg: (msg.send_timestamp, msg.id))
+    return selected
+
+
 async def render_history_data(
     chat_key: str,
     db_chat_channel: DBChatChannel,
@@ -497,8 +512,22 @@ async def render_history_data(
             else:
                 _to_remove_msgs.append(msg)
     recent_chat_messages = [msg for msg in recent_chat_messages if msg not in _to_remove_msgs]
-    # 反转列表顺序并确保不超过最大长度
-    recent_chat_messages = recent_chat_messages[::-1][-config.AI_CHAT_CONTEXT_MAX_LENGTH :]
+
+    # Keep the newest trigger and its direct reply target before filling the
+    # remaining slots with ordinary recent history.
+    newest_user_message = next((msg for msg in recent_chat_messages if not msg.is_system), None)
+    referenced_message: Optional[DBChatMessage] = None
+    if newest_user_message and newest_user_message.ext_data_obj.ref_msg_id:
+        referenced_message = await DBChatMessage.filter(
+            chat_key=chat_key,
+            message_id=newest_user_message.ext_data_obj.ref_msg_id,
+        ).first()
+
+    recent_chat_messages = _select_recent_chat_messages(
+        recent_chat_messages,
+        config.AI_CHAT_CONTEXT_MAX_LENGTH,
+        referenced_message,
+    )
 
     # 预先构建包含 plugin_injected_prompt 的基础消息，无论是否有历史记录都需要保留注入提示词
     base_message: OpenAIChatMessage = OpenAIChatMessage.from_template(

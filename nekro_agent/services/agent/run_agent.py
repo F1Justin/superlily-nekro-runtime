@@ -404,6 +404,7 @@ async def send_agent_request(
                 first_token_timeout=config.AI_STREAM_FIRST_TOKEN_TIMEOUT,
                 log_path=log_path,
                 error_log_path=err_log_path,
+                session_id=chat_key,
             )
         except Exception as e:
             error_summary = _summarize_runtime_text(str(e))

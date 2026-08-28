@@ -7,11 +7,11 @@ RUN npm config set registry https://registry.npmmirror.com
 # 设置工作目录
 WORKDIR /app/frontend
 
-# 安装 pnpm
-RUN npm install -g pnpm && pnpm config set registry https://registry.npmmirror.com
+# 安装固定版本 pnpm
+RUN npm install -g pnpm@10.34.5 && pnpm config set registry https://registry.npmmirror.com
 
 # 首先复制依赖文件，利用缓存
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # 然后复制源代码并构建
@@ -32,6 +32,13 @@ FROM busybox:1.36 AS frontend-dist
 COPY --from=frontend-builder /app/frontend/dist /frontend-dist
 
 FROM python:3.11-slim-bullseye
+
+ARG VCS_REF=unknown
+ARG BUILD_VERSION=unknown
+LABEL org.opencontainers.image.title="SuperLily Nekro Runtime" \
+      org.opencontainers.image.source="https://github.com/F1Justin/superlily-nekro-runtime" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${BUILD_VERSION}"
 
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive

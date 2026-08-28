@@ -14,11 +14,17 @@ mime = magic.Magic(mime=True)
 class OpenAIChatMessage:
     """OpenAI 聊天消息"""
 
-    def __init__(self, role: Literal["user", "assistant", "system"], content: List[Dict[str, Any]]):
+    def __init__(
+        self,
+        role: Literal["user", "assistant", "system"],
+        content: List[Dict[str, Any]],
+        cache_breakpoint: bool = False,
+    ):
         self.role: Literal["user", "assistant", "system"] = role
         self.content = content
+        self.cache_breakpoint = cache_breakpoint
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, include_cache_control: bool = False) -> Dict[str, Any]:
         """转换为字典
 
         将连续的文本内容进行聚合，例如:
@@ -27,7 +33,9 @@ class OpenAIChatMessage:
         [{"type": "text", "text": "你好 世界"}]
         """
 
-        if all(_c["type"] == "text" for _c in self.content):
+        if all(_c["type"] == "text" for _c in self.content) and not (
+            include_cache_control and self.cache_breakpoint
+        ):
             return {"role": self.role, "content": "".join(_c["text"] for _c in self.content)}
 
         merged_content: List[Dict[str, Any]] = []
@@ -42,7 +50,13 @@ class OpenAIChatMessage:
                 merged_content.append(segment)
         if current_text:
             merged_content.append({"type": "text", "text": current_text})
+        if include_cache_control and self.cache_breakpoint and merged_content:
+            merged_content[-1] = {**merged_content[-1], "cache_control": {"type": "ephemeral"}}
         return {"role": self.role, "content": merged_content}
+
+    def mark_cache_breakpoint(self) -> "OpenAIChatMessage":
+        """Mark the end of a stable prompt prefix for providers with explicit caching."""
+        return OpenAIChatMessage(self.role, self.content, cache_breakpoint=True)
 
     @classmethod
     def from_text(cls, role: Literal["user", "assistant", "system"], text: str) -> "OpenAIChatMessage":
@@ -80,7 +94,11 @@ class OpenAIChatMessage:
             raise ValueError("消息角色不一致")
         if isinstance(other.content, str):
             other.content = [ContentSegment.text_content(other.content)]
-        return OpenAIChatMessage(self.role, self.content + other.content)
+        return OpenAIChatMessage(
+            self.role,
+            self.content + other.content,
+            cache_breakpoint=self.cache_breakpoint or other.cache_breakpoint,
+        )
 
     def tidy(self) -> "OpenAIChatMessage":
         """整理消息合并所有连续的文本内容"""
@@ -96,7 +114,7 @@ class OpenAIChatMessage:
                 merged_content.append(segment)
         if current_text:
             merged_content.append({"type": "text", "text": current_text})
-        return OpenAIChatMessage(self.role, merged_content)
+        return OpenAIChatMessage(self.role, merged_content, cache_breakpoint=self.cache_breakpoint)
 
 
 class ContentSegment:

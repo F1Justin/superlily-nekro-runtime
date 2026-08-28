@@ -1,3 +1,4 @@
+import ast
 import re
 
 from pydantic import BaseModel
@@ -7,6 +8,36 @@ class ParsedCodeRunData(BaseModel):
     raw_content: str
     code_content: str
     thought_chain: str
+
+
+_INJECTED_METHOD_IMPORTS = {
+    "lily_core_bridge": frozenset({"submit_rendered_markdown"}),
+}
+
+
+def _strip_injected_method_imports(code_content: str) -> str:
+    """Remove only exact, standalone imports for globally injected methods."""
+    try:
+        tree = ast.parse(code_content)
+    except SyntaxError:
+        return code_content
+
+    lines = code_content.splitlines(keepends=True)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level != 0:
+            continue
+        allowed_names = _INJECTED_METHOD_IMPORTS.get(node.module or "")
+        if not allowed_names or node.lineno != node.end_lineno:
+            continue
+        if not node.names or any(alias.asname or alias.name not in allowed_names for alias in node.names):
+            continue
+        source_segment = ast.get_source_segment(code_content, node)
+        line_index = node.lineno - 1
+        if source_segment is None or lines[line_index].strip() != source_segment.strip():
+            continue
+        lines[line_index] = "\n" if lines[line_index].endswith("\n") else ""
+
+    return "".join(lines)
 
 
 def parse_chat_response(raw_content: str) -> ParsedCodeRunData:
@@ -79,6 +110,7 @@ def parse_chat_response(raw_content: str) -> ParsedCodeRunData:
 
 def fix_code_content(code_content: str) -> str:
     """修复代码内容"""
+    code_content = _strip_injected_method_imports(code_content)
     # 修正代码块去掉所有 from plugins ... import ... 开头的行
     code_content = re.sub(r"^from plugins.*\n", "", code_content, flags=re.MULTILINE)
     code_content = re.sub(r"^from predefined_methods .*\n", "", code_content, flags=re.MULTILINE)

@@ -12,10 +12,6 @@ from .history import HistoryFirstStart, render_history_data
 from .practice import (
     BasePracticePrompt_question,
     BasePracticePrompt_response,
-    PracticePrompt_question_1,
-    PracticePrompt_question_2,
-    PracticePrompt_response_1,
-    PracticePrompt_response_2,
 )
 from .system import PersonaPrompt, PolicyKernelPrompt, RuntimeContractPrompt, SystemPrompt
 
@@ -78,7 +74,7 @@ class PromptCompiler:
                 plugins_prompt=self.plugins_prompt,
             ),
             default_env,
-        )
+        ).mark_cache_breakpoint()
 
     def render_practice_messages(
         self,
@@ -101,30 +97,11 @@ class PromptCompiler:
                 else:
                     raise TypeError(f"未知消息类型模板: {prompt_template}")
                 messages.append(OpenAIChatMessage.from_template(role, prompt_template, adapter_jinja_env))
+            if messages:
+                messages[-1] = messages[-1].mark_cache_breakpoint()
             return messages
 
-        return [
-            OpenAIChatMessage.from_template("user", PracticePrompt_question_1(one_time_code=EXAMPLE_SESSION_TOKEN), default_env),
-            OpenAIChatMessage.from_template(
-                "assistant",
-                PracticePrompt_response_1(
-                    one_time_code=EXAMPLE_SESSION_TOKEN,
-                    enable_cot=self.enable_cot,
-                    enable_at=self.enable_at,
-                ),
-                default_env,
-            ),
-            OpenAIChatMessage.from_template("user", PracticePrompt_question_2(one_time_code=EXAMPLE_SESSION_TOKEN), default_env),
-            OpenAIChatMessage.from_template(
-                "assistant",
-                PracticePrompt_response_2(
-                    one_time_code=EXAMPLE_SESSION_TOKEN,
-                    enable_cot=self.enable_cot,
-                    enable_at=self.enable_at,
-                ),
-                default_env,
-            ),
-        ]
+        return []
 
     async def render_history_message(
         self,
