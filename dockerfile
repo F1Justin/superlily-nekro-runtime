@@ -33,13 +33,6 @@ COPY --from=frontend-builder /app/frontend/dist /frontend-dist
 
 FROM python:3.11-slim-bullseye
 
-ARG VCS_REF=unknown
-ARG BUILD_VERSION=unknown
-LABEL org.opencontainers.image.title="SuperLily Nekro Runtime" \
-      org.opencontainers.image.source="https://github.com/F1Justin/superlily-nekro-runtime" \
-      org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.version="${BUILD_VERSION}"
-
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -85,6 +78,13 @@ COPY .env.prod ./
 
 # 从前端构建产物复制静态文件
 COPY --from=frontend-dist /frontend-dist ${STATIC_DIR}
+
+ARG VCS_REF=unknown
+ARG BUILD_VERSION=unknown
+LABEL org.opencontainers.image.title="SuperLily Nekro Runtime" \
+      org.opencontainers.image.source="https://github.com/F1Justin/superlily-nekro-runtime" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${BUILD_VERSION}"
 
 # 暴露端口
 EXPOSE 8021
