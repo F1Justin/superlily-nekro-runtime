@@ -67,12 +67,17 @@ COPY pyproject.toml uv.lock README.md ./
 # 复制入口脚本（force-include 需要）
 COPY run_bot.py ./
 
-# 使用 UV 安装依赖（包括 nb-cli）
-RUN uv sync --frozen --no-dev
+# 先安装锁定依赖，保留不受源码变更影响的依赖缓存层
+RUN uv sync --frozen --no-dev --no-install-project
 
-# 复制应用代码
+# 复制并安装应用代码
 COPY nekro_agent ./nekro_agent
 COPY plugins ./plugins
+RUN uv sync --frozen --no-dev \
+    && NEKRO_DATA_DIR=/tmp/nekro-build-smoke .venv/bin/python -c \
+        "import nekro_agent; assert nekro_agent.__file__" \
+    && rm -rf /tmp/nekro-build-smoke
+
 COPY migrations ./migrations
 COPY .env.prod ./
 
