@@ -18,6 +18,8 @@ SuperLily 专用补丁和可复现的 Runtime release；莉莉的身份、世界
 
 - 项目宪法与 R0–R5 路线：
   [`F1Justin/superlily`](https://github.com/F1Justin/superlily)
+- 两个仓库共用的目标与工作看板：
+  [`SuperLily GitHub Project`](https://github.com/users/F1Justin/projects/1)
 - 冻结生产基线：
   [`docs/R0_BASELINE.md`](https://github.com/F1Justin/superlily/blob/master/docs/R0_BASELINE.md)
 - Runtime 源码、upstream、tag、commit 与镜像锁：

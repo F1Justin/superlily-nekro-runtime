@@ -20,6 +20,8 @@ the parent repository.
 
 - Manifesto and authoritative R0–R5 roadmap:
   [`F1Justin/superlily`](https://github.com/F1Justin/superlily)
+- Shared goals and work board for both repositories:
+  [`SuperLily GitHub Project`](https://github.com/users/F1Justin/projects/1)
 - Frozen production baseline:
   [`docs/R0_BASELINE.md`](https://github.com/F1Justin/superlily/blob/master/docs/R0_BASELINE.md)
 - Runtime source, upstream, tag, commit, and image lock:
