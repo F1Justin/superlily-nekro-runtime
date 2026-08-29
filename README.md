@@ -1,6 +1,38 @@
-# Nekro Agent - 更智能、更优雅的代理执行 AI
+# SuperLily Nekro Runtime
 
 Switch to [English](./README_en.md)
+
+本仓库是 [Superlily](https://github.com/F1Justin/superlily) 的当前生产
+**Cognitive Runtime**，基于 Nekro Agent v2.3.3 维护。它负责认知运行时源码、
+SuperLily 专用补丁和可复现的 Runtime release；莉莉的身份、世界事实、authority、
+产品路线、部署身份与验收由主仓库负责。
+
+## 当前生产身份
+
+| 项目 | 值 |
+| --- | --- |
+| Runtime release | `v2.3.3-superlily.4` |
+| 生产源码 commit | `b56e4655205c0e896b9e18a71da0b8580a3e2a12` |
+| 生产镜像 | `superlily/nekro-agent:2.3.3-superlily.4` |
+| Upstream 基线 | [`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3) |
+
+- 项目宪法与 R0–R5 路线：
+  [`F1Justin/superlily`](https://github.com/F1Justin/superlily)
+- 冻结生产基线：
+  [`docs/R0_BASELINE.md`](https://github.com/F1Justin/superlily/blob/master/docs/R0_BASELINE.md)
+- Runtime 源码、upstream、tag、commit 与镜像锁：
+  [`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml)
+
+> [!WARNING]
+> 下方保留的是 upstream Nekro Agent 的通用文档。其中 `kromiose/nekro-agent:latest`、
+> upstream 安装脚本和 Release 页面不会部署本仓库的 SuperLily 生产 fork。生产部署必须
+> 使用主仓库锁定并审阅的 Runtime tag、commit 和镜像身份。
+
+SuperLily 会持续从 Pi、Codex、DSH 和其他优秀 Agent Harness 中研究设计经验，但这些
+工程不是本仓库计划接入的 backend。当前路线是在这个 Nekro fork 内逐步改善真实执行
+反馈、可逆认知工作空间和自然 Agent loop。
+
+## Upstream Nekro Agent 文档
 
 <!-- markdownlint-disable MD033 MD041 -->
 

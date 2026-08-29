@@ -1,6 +1,43 @@
-# Nekro Agent - A Smarter, More Elegant Agent Execution AI
+# SuperLily Nekro Runtime
 
 转到 [简体中文](./README.md)
+
+This repository is the current production **Cognitive Runtime** for
+[Superlily](https://github.com/F1Justin/superlily), maintained on top of Nekro
+Agent v2.3.3. It owns the cognitive-runtime source, SuperLily-specific patches,
+and reproducible Runtime releases. Lily's identity, world facts, authority,
+product roadmap, deployment identity, and acceptance evidence remain owned by
+the parent repository.
+
+## Current production identity
+
+| Item | Value |
+| --- | --- |
+| Runtime release | `v2.3.3-superlily.4` |
+| Production source commit | `b56e4655205c0e896b9e18a71da0b8580a3e2a12` |
+| Production image | `superlily/nekro-agent:2.3.3-superlily.4` |
+| Upstream baseline | [`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3) |
+
+- Manifesto and authoritative R0–R5 roadmap:
+  [`F1Justin/superlily`](https://github.com/F1Justin/superlily)
+- Frozen production baseline:
+  [`docs/R0_BASELINE.md`](https://github.com/F1Justin/superlily/blob/master/docs/R0_BASELINE.md)
+- Runtime source, upstream, tag, commit, and image lock:
+  [`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml)
+
+> [!WARNING]
+> The upstream Nekro Agent documentation is preserved below. Its
+> `kromiose/nekro-agent:latest` image, installation scripts, and release pages
+> do not deploy this SuperLily production fork. Production deployments must use
+> the reviewed Runtime tag, commit, and image identity pinned by the parent
+> repository.
+
+SuperLily studies design lessons from Pi, Codex, DSH, and other strong Agent
+Harnesses, but those projects are not planned backends for this repository. The
+current direction is to evolve real execution feedback, a reversible cognitive
+workspace, and a natural Agent loop inside this Nekro fork.
+
+## Upstream Nekro Agent documentation
 
 <!-- markdownlint-disable MD033 MD041 -->
 
