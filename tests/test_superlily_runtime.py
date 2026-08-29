@@ -9,6 +9,8 @@ import pytest
 from nekro_agent.core.os_env import _ensure_upload_dir
 from nekro_agent.models.db_exec_code import ExecStopType
 from nekro_agent.services.agent.resolver import fix_code_content
+from nekro_agent.services.agent.templates.base import env as prompt_env
+from nekro_agent.services.agent.templates.system import RuntimeContractPrompt, SystemPrompt
 from nekro_agent.services.sandbox import runner
 
 
@@ -45,6 +47,35 @@ def test_renderer_import_normalization_preserves_ambiguous_code(source: str) -> 
 def test_renderer_import_normalization_removes_exact_pseudo_module_import() -> None:
     source = "from lily_core_bridge import submit_rendered_markdown\nsubmit_rendered_markdown('ok')\n"
     assert fix_code_content(source) == "\nsubmit_rendered_markdown('ok')\n"
+
+
+def test_runtime_contract_teaches_raw_python_without_language_fences() -> None:
+    prompt = RuntimeContractPrompt(
+        platform_name="QQ",
+        bot_platform_id="123",
+        enable_cot=False,
+        chat_key_rules="Use the current chat key.",
+        enable_at=False,
+        plugin_activation_rules="",
+    ).render(prompt_env)
+
+    assert "OUTPUT RAW EXECUTABLE PYTHON SOURCE ONLY" in prompt
+    assert "Never write a\nlanguage label" in prompt
+    assert "```python\nsend_msg_text" not in prompt
+    assert "```python\nagent_method" not in prompt
+    assert "```python\nplt.savefig" not in prompt
+
+
+def test_final_output_contract_follows_plugin_documentation() -> None:
+    prompt = SystemPrompt(
+        stable_static="policy",
+        channel_static="persona",
+        runtime_dynamic="runtime",
+        plugins_prompt="```python\nplugin_example()\n```",
+    ).render(prompt_env)
+
+    assert prompt.rfind("### FINAL OUTPUT CONTRACT") > prompt.rfind("</plugins>")
+    assert "those fences\nand their language labels are documentation only" in prompt
 
 
 class FakeContainer:
