@@ -41,6 +41,10 @@ _OPENROUTER_PARALLEL_TURBO_TOOL: Dict[str, Any] = {
     },
 }
 
+# OpenRouter 用这两个请求头在官网/用量页标识请求来源应用；未设置时显示为 "Unknown"。
+_OPENROUTER_APP_TITLE = "nekro"
+_OPENROUTER_APP_REFERER = "https://github.com/F1Justin/superlily-nekro-runtime"
+
 
 def parse_extra_body(extra_body_json: Optional[str], source_hint: str = "") -> Optional[Dict[str, Any]]:
     """解析 extra_body JSON 字符串
@@ -463,11 +467,13 @@ def _create_http_client(
     write_timeout: int = 3600,
     connect_timeout: int = 10,
     pool_timeout: int = 10,
+    is_openrouter: bool = False,
 ) -> httpx.AsyncClient:
     """创建配置好的 httpx.AsyncClient
 
     统一管理 HTTP 客户端配置，包括：
     - User-Agent 强制设置为 config.OPENAI_CLIENT_USER_AGENT（通过事件钩子防止被覆盖）
+    - 对 OpenRouter 请求附加 X-Title / HTTP-Referer，用于在 OpenRouter 用量页标识应用
     - 代理配置
     - 超时配置
 
@@ -477,14 +483,18 @@ def _create_http_client(
         write_timeout: 写入超时时间（秒），默认 3600
         connect_timeout: 连接超时时间（秒），默认 10
         pool_timeout: 连接池超时时间（秒），默认 10
+        is_openrouter: 请求目标是否为 OpenRouter，用于附加应用标识头
 
     Returns:
         配置好的 httpx.AsyncClient 实例
     """
 
-    # 使用事件钩子强制设置 User-Agent，防止 AsyncOpenAI 覆盖
-    async def enforce_user_agent(request: httpx.Request) -> None:
+    # 使用事件钩子强制设置 User-Agent，防止 AsyncOpenAI 覆盖；OpenRouter 请求额外附加标识头
+    async def enforce_headers(request: httpx.Request) -> None:
         request.headers["User-Agent"] = config.OPENAI_CLIENT_USER_AGENT
+        if is_openrouter:
+            request.headers["X-Title"] = _OPENROUTER_APP_TITLE
+            request.headers["HTTP-Referer"] = _OPENROUTER_APP_REFERER
 
     return httpx.AsyncClient(
         timeout=httpx.Timeout(
@@ -494,7 +504,7 @@ def _create_http_client(
             pool=pool_timeout,
         ),
         proxies={"http://": proxy_url, "https://": proxy_url} if proxy_url else None,
-        event_hooks={"request": [enforce_user_agent]},
+        event_hooks={"request": [enforce_headers]},
     )
 
 
@@ -730,6 +740,7 @@ async def gen_openai_chat_response(
                 proxy_url=proxy_url,
                 read_timeout=wait_timeout,
                 write_timeout=wait_timeout,
+                is_openrouter=is_openrouter,
             ) as http_client,
             AsyncOpenAI(
                 api_key=api_key.strip() if api_key else None,
@@ -944,6 +955,8 @@ async def gen_openai_chat_stream(
     logger.info(f"启动简化的流式生成，使用模型: {model}")
 
     # Parse extra_body if it is a string
+    normalized_host = (urlparse(base_url).hostname or "").lower() if base_url else ""
+    is_openrouter = normalized_host == "openrouter.ai" or normalized_host.endswith(".openrouter.ai")
     if isinstance(extra_body, str):
         extra_body = parse_extra_body(extra_body, source_hint=f"Model: {model}")
 
@@ -980,6 +993,7 @@ async def gen_openai_chat_stream(
             proxy_url=proxy_url,
             read_timeout=300,
             write_timeout=300,
+            is_openrouter=is_openrouter,
         ) as http_client:
             client = AsyncOpenAI(
                 api_key=api_key.strip() if api_key else None,

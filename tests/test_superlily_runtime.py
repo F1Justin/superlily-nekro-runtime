@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import httpx
 
 from nekro_agent.core.os_env import _ensure_upload_dir
 from nekro_agent.adapters.interface.schemas.platform import PlatformSendRequest
@@ -15,6 +16,7 @@ from nekro_agent.schemas.chat_message import ChatMessage, ChatMessageSegmentImag
 from nekro_agent.services.agent.creator import OpenAIChatMessage
 from nekro_agent.services.agent.resolver import fix_code_content
 from nekro_agent.services.agent.run_agent import _get_reply_focus_ids
+from nekro_agent.services.agent.openai import _create_http_client
 from nekro_agent.services.agent.templates.base import env as prompt_env
 from nekro_agent.services.agent.templates.compiler import PromptCompiler
 from nekro_agent.services.agent.templates.history import (
@@ -371,3 +373,26 @@ def test_platform_send_request_coerces_numeric_ref_msg_id() -> None:
         PlatformSendRequest(chat_key="onebot_v11-group_1", ref_msg_id="1258475452").ref_msg_id
         == "1258475452"
     )
+
+
+@pytest.mark.asyncio
+async def test_openrouter_http_client_sets_application_identity_headers() -> None:
+    # OpenRouter 用 X-Title / HTTP-Referer 在用量页标识请求来源应用；未设置时显示 Unknown。
+    async with _create_http_client(is_openrouter=True) as client:
+        hook = client._event_hooks["request"][0]
+        req = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        await hook(req)
+        assert req.headers["X-Title"] == "nekro"
+        assert req.headers["HTTP-Referer"] == "https://github.com/F1Justin/superlily-nekro-runtime"
+        assert req.headers["User-Agent"] == "nekro-agent"
+
+
+@pytest.mark.asyncio
+async def test_non_openrouter_http_client_omits_application_identity_headers() -> None:
+    async with _create_http_client(is_openrouter=False) as client:
+        hook = client._event_hooks["request"][0]
+        req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        await hook(req)
+        assert "X-Title" not in req.headers
+        assert "HTTP-Referer" not in req.headers
+        assert req.headers["User-Agent"] == "nekro-agent"
