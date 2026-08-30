@@ -7,14 +7,21 @@ Switch to [English](./README_en.md)
 SuperLily 专用补丁和可复现的 Runtime release；莉莉的身份、世界事实、authority、
 产品路线、部署身份与验收由主仓库负责。
 
-## 当前生产身份
+> [!IMPORTANT]
+> 这是 SuperLily 的生产 downstream fork，不是 Nekro Agent 的通用替代发行版，也不承诺
+> 跟随 Nekro NXT。若要部署通用 Nekro Agent，请使用
+> [`KroMiose/nekro-agent`](https://github.com/KroMiose/nekro-agent)。
 
-| 项目 | 值 |
-| --- | --- |
-| Runtime release | `v2.3.3-superlily.4` |
-| 生产源码 commit | `b56e4655205c0e896b9e18a71da0b8580a3e2a12` |
-| 生产镜像 | `superlily/nekro-agent:2.3.3-superlily.4` |
-| Upstream 基线 | [`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3) |
+## 生产身份与下游边界
+
+本仓库不在 README 中重复手写易漂移的 current version。当前生产 Runtime 的 tag、commit
+与镜像唯一以主仓库的
+[`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml)
+为准。Upstream fork point 固定为
+[`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3)。
+
+SuperLily 专用改动、可向 upstream 提炼的改动、同步策略、branch/tag 规则与许可证关系见
+[`docs/SUPERLILY_DOWNSTREAM.md`](docs/SUPERLILY_DOWNSTREAM.md)。
 
 - 项目宪法与 R0–R5 路线：
   [`F1Justin/superlily`](https://github.com/F1Justin/superlily)

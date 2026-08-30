@@ -9,15 +9,16 @@ temporary checkout.
 
 - This repository owns the Nekro application source, sandbox lifecycle,
   provider request behavior, prompt compilation, and the production image.
-- `/home/justin/superlily` owns Lily Core, the Nekro-to-Lily bridge plugin,
-  deployment orchestration, and the pinned Runtime commit/image identity.
-- `/home/justin/nekro` contains persistent runtime configuration, plugins,
-  uploads, and other operational data. It is not a source checkout.
+- The [SuperLily parent repository](https://github.com/F1Justin/superlily)
+  owns Lily Core, the Nekro-to-Lily bridge plugin, deployment orchestration,
+  and the pinned Runtime commit/image identity.
+- Persistent production configuration, plugins, uploads, and operational data
+  live outside this source checkout and are never part of this repository.
 
 The production branch starts from upstream tag `v2.3.3`, commit
 `a34c32f853c3d530b2372b93f68f8bf2469c5333`. The `upstream` remote points to
-`KroMiose/nekro-agent`; the writable `origin` remote points to the private
-SuperLily runtime repository.
+`KroMiose/nekro-agent`; the writable `origin` remote points to the SuperLily
+runtime repository.
 
 ## Production changes
 
@@ -31,10 +32,9 @@ SuperLily runtime repository.
 - adapter-captured fallback snapshots for quoted messages missing from the
   local history database.
 
-`AI_VISION_IMAGE_LIMIT` remains runtime configuration and is currently set to
-`1` in `/home/justin/nekro/configs/nekro-agent.yaml`. Directly quoted images
-have a separate `AI_VISION_REPLY_IMAGE_LIMIT`, currently `4`, so newer
-unrelated images cannot displace them.
+`AI_VISION_IMAGE_LIMIT` remains runtime configuration. Directly quoted images
+have a separate `AI_VISION_REPLY_IMAGE_LIMIT`, so newer unrelated images cannot
+displace them without changing the ordinary history-image budget.
 
 ## Verification and build
 

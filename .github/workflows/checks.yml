@@ -1,0 +1,34 @@
+name: Downstream checks
+
+on:
+  push:
+    branches:
+      - superlily/runtime-v2.3.3
+    tags:
+      - "v*-superlily.*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: downstream-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+      - name: Lint
+        run: uv run poe lint
+      - name: Typecheck
+        run: uv run poe typecheck
+      - name: SuperLily Runtime regression tests
+        run: uv run pytest tests/test_superlily_runtime.py

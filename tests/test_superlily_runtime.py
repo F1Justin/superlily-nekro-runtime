@@ -5,18 +5,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import pytest
 import httpx
+import pytest
 
-from nekro_agent.core.os_env import _ensure_upload_dir
 from nekro_agent.adapters.interface.schemas.platform import PlatformSendRequest
+from nekro_agent.core.os_env import _ensure_upload_dir
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_exec_code import ExecStopType
 from nekro_agent.schemas.chat_message import ChatMessage, ChatMessageSegmentImage
 from nekro_agent.services.agent.creator import OpenAIChatMessage
+from nekro_agent.services.agent.openai import _create_http_client
 from nekro_agent.services.agent.resolver import fix_code_content
 from nekro_agent.services.agent.run_agent import _get_reply_focus_ids
-from nekro_agent.services.agent.openai import _create_http_client
 from nekro_agent.services.agent.templates.base import env as prompt_env
 from nekro_agent.services.agent.templates.compiler import PromptCompiler
 from nekro_agent.services.agent.templates.history import (

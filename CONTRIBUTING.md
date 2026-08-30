@@ -1,5 +1,12 @@
 # NekroAgent 开发贡献指南
 
+> [!IMPORTANT]
+> 本仓库是 SuperLily 的生产 downstream fork，不是通用 Nekro Agent 发行版。仅影响
+> SuperLily downstream 的问题和 PR 可以提交到本仓库；通用 Nekro 问题应先提交到
+> [`KroMiose/nekro-agent`](https://github.com/KroMiose/nekro-agent)。维护者不承诺响应
+> 时间、兼容周期或第三方部署支持。详细边界见
+> [`docs/SUPERLILY_DOWNSTREAM.md`](docs/SUPERLILY_DOWNSTREAM.md)。
+
 感谢您对 NekroAgent 项目的关注！本指南将帮助您快速开始开发。
 
 ## 📚 完整开发文档

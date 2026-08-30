@@ -9,14 +9,24 @@ and reproducible Runtime releases. Lily's identity, world facts, authority,
 product roadmap, deployment identity, and acceptance evidence remain owned by
 the parent repository.
 
-## Current production identity
+> [!IMPORTANT]
+> This is SuperLily's production downstream fork. It is not a general Nekro
+> Agent replacement distribution and does not promise to track Nekro NXT. For
+> general Nekro Agent deployment, use
+> [`KroMiose/nekro-agent`](https://github.com/KroMiose/nekro-agent).
 
-| Item | Value |
-| --- | --- |
-| Runtime release | `v2.3.3-superlily.4` |
-| Production source commit | `b56e4655205c0e896b9e18a71da0b8580a3e2a12` |
-| Production image | `superlily/nekro-agent:2.3.3-superlily.4` |
-| Upstream baseline | [`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3) |
+## Production identity and downstream boundary
+
+This README intentionally does not duplicate a drift-prone current version.
+The sole source of truth for the production Runtime tag, commit, and image is
+the parent repository's
+[`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml).
+The upstream fork point is
+[`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3).
+
+See [`docs/SUPERLILY_DOWNSTREAM.md`](docs/SUPERLILY_DOWNSTREAM.md) for the
+SuperLily-specific delta, upstreamable changes, sync policy, branch/tag rules,
+and license relationship.
 
 - Manifesto and authoritative R0–R5 roadmap:
   [`F1Justin/superlily`](https://github.com/F1Justin/superlily)
