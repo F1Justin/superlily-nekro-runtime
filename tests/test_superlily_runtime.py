@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from nekro_agent.core.os_env import _ensure_upload_dir
+from nekro_agent.adapters.interface.schemas.platform import PlatformSendRequest
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_exec_code import ExecStopType
 from nekro_agent.schemas.chat_message import ChatMessage, ChatMessageSegmentImage
@@ -356,3 +357,17 @@ async def test_sandbox_container_state_never_reuses_a_closed_client(tmp_path: Pa
         await _cancel_cleanup(chat_key)
         for active_patch in reversed(patches):
             active_patch.stop()
+
+
+def test_platform_send_request_coerces_numeric_ref_msg_id() -> None:
+    # 平台消息 ID 常由模型作为数字传入（如 OneBot 的 message_id），入口必须接受并
+    # 转成字符串，否则发送校验会以 ref_msg_id 类型错误失败。
+    request = PlatformSendRequest(chat_key="onebot_v11-group_1", ref_msg_id=832258295)
+    assert request.ref_msg_id == "832258295"
+    assert isinstance(request.ref_msg_id, str)
+
+    assert PlatformSendRequest(chat_key="onebot_v11-group_1").ref_msg_id is None
+    assert (
+        PlatformSendRequest(chat_key="onebot_v11-group_1", ref_msg_id="1258475452").ref_msg_id
+        == "1258475452"
+    )

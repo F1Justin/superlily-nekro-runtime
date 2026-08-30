@@ -231,7 +231,7 @@ SEND_FILE_CACHE: Dict[str, List[str]] = {}  # 文件 MD5 缓存，格式: {chat_
     description="发送聊天消息文本，附带缓存消息重复检查",
 )
 async def send_msg_text(_ctx: AgentCtx, chat_key: str, message_text: str, ref_msg_id: Optional[str] = None):
-    """`send_msg_text(chat_key, message_text, ref_msg_id=None)` sends text to a chat.
+    """`send_msg_text(chat_key, message_text, ref_msg_id: str = None)` sends text to a chat.
 
     Use `ref_msg_id` only when an actual reply or reference is needed.
     """
@@ -306,7 +306,7 @@ async def send_msg_text(_ctx: AgentCtx, chat_key: str, message_text: str, ref_ms
     description="发送聊天消息图片/文件资源，附带缓存文件重复检查",
 )
 async def send_msg_file(_ctx: AgentCtx, chat_key: str, file_path: str, ref_msg_id: Optional[str] = None):
-    """`send_msg_file(chat_key, file_path, ref_msg_id=None)` sends an existing image or file from the sandbox or a supported URL."""
+    """`send_msg_file(chat_key, file_path, ref_msg_id: str = None)` sends an existing image or file from the sandbox or a supported URL."""
     global SEND_FILE_CACHE
     file_container_path = file_path  # 防止误导llm
     if not isinstance(file_container_path, str):

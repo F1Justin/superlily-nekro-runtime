@@ -2,7 +2,7 @@ from enum import Enum
 from time import time
 from typing import TYPE_CHECKING, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from nekro_agent.models.db_chat_channel import DBChatChannel, DefaultPreset
 from nekro_agent.models.db_preset import DBPreset
@@ -101,6 +101,13 @@ class PlatformSendRequest(BaseModel):
     chat_key: str = Field(..., description="聊天标识")
     segments: List[PlatformSendSegment] = Field(default=[], description="消息段列表")
     ref_msg_id: Optional[str] = Field(default=None, description="引用消息ID")
+
+    @field_validator("ref_msg_id", mode="before")
+    @classmethod
+    def _stringify_ref_msg_id(cls, v: object) -> object:
+        # 平台消息 ID 常由模型作为数字传入（如 OneBot 的 message_id），而各适配器
+        # 接收的是字符串形式引用 ID；统一在入口转成字符串，避免发送校验失败。
+        return str(v) if isinstance(v, int) else v
 
 
 class PlatformSendResponse(BaseModel):
