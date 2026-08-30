@@ -34,20 +34,14 @@ class PromptCompiler:
         chat_preset: str,
         plugins_prompt: str,
         plugins_runtime_prompt: str,
-        plugin_activation_rules: str,
         enable_cot: bool,
-        chat_key_rules: str,
-        enable_at: bool,
     ):
         self.platform_name = platform_name
         self.bot_platform_id = bot_platform_id
         self.chat_preset = chat_preset
         self.plugins_prompt = plugins_prompt
         self.plugins_runtime_prompt = plugins_runtime_prompt
-        self.plugin_activation_rules = plugin_activation_rules
         self.enable_cot = enable_cot
-        self.chat_key_rules = chat_key_rules
-        self.enable_at = enable_at
 
     def compile_segments(self) -> PromptSegments:
         return PromptSegments(
@@ -57,9 +51,6 @@ class PromptCompiler:
                 platform_name=self.platform_name,
                 bot_platform_id=self.bot_platform_id,
                 enable_cot=self.enable_cot,
-                chat_key_rules=self.chat_key_rules,
-                enable_at=self.enable_at,
-                plugin_activation_rules=self.plugin_activation_rules,
             ).render(default_env),
         )
 

@@ -231,31 +231,9 @@ SEND_FILE_CACHE: Dict[str, List[str]] = {}  # 文件 MD5 缓存，格式: {chat_
     description="发送聊天消息文本，附带缓存消息重复检查",
 )
 async def send_msg_text(_ctx: AgentCtx, chat_key: str, message_text: str, ref_msg_id: Optional[str] = None):
-    """发送聊天消息文本
+    """`send_msg_text(chat_key, message_text, ref_msg_id=None)` sends text to a chat.
 
-    Attention:
-        1. Do not expose any unnecessary technical id or key in the message content.
-        2. You can always send messages that are confident in the content, not content that you don't even know what it will be.
-
-    Args:
-        chat_key (str): 聊天频道标识
-        message_text (str): 消息内容
-        ref_msg_id (Optional[str]): 引用消息 ID (部分适配器可用，参考 `Reference_Message`，若需要引用时传递，不需要在 `message_text` 中重复说明被引用消息!)
-
-    Example:
-        # Send some valid message
-        send_msg_text(_ck, f"Hello, 1 + 1 = {1+1}")  # You can predict the result of the calculation
-
-        # Bad Example:
-        try:
-            ... # Do something
-        except Exception as e:
-            send_msg_text(_ck, f"Error: {e}")  # You can't send error message directly, because you can't be sure about the content.
-
-        # Good Example:
-        ... # Just do something **WITHOUT ANY TRY-EXCEPT BLOCK**! You have the opportunity to debug and fix it only if you let the error happen directly instead of covering it up.
-        result = ... # Always use the right result, not the error message.
-        send_msg_text(_ck, f"Result: {result}")  # You can send the result of the calculation directly.
+    Use `ref_msg_id` only when an actual reply or reference is needed.
     """
     global SEND_MSG_CACHE
 
@@ -328,13 +306,7 @@ async def send_msg_text(_ctx: AgentCtx, chat_key: str, message_text: str, ref_ms
     description="发送聊天消息图片/文件资源，附带缓存文件重复检查",
 )
 async def send_msg_file(_ctx: AgentCtx, chat_key: str, file_path: str, ref_msg_id: Optional[str] = None):
-    """发送聊天消息图片/文件资源
-
-    Args:
-        chat_key (str): 聊天频道标识
-        file_path (str): 图片/文件路径或 URL 容器内路径
-        ref_msg_id (Optional[str]): 引用消息 ID (部分适配器可用，参考 `Reference_Message`)
-    """
+    """`send_msg_file(chat_key, file_path, ref_msg_id=None)` sends an existing image or file from the sandbox or a supported URL."""
     global SEND_FILE_CACHE
     file_container_path = file_path  # 防止误导llm
     if not isinstance(file_container_path, str):
@@ -399,14 +371,7 @@ async def send_msg_file(_ctx: AgentCtx, chat_key: str, file_path: str, ref_msg_i
     description="获取用户头像",
 )
 async def get_user_avatar(_ctx: AgentCtx, user_qq: str) -> str:
-    """获取用户头像
-
-    Args:
-        user_qq (str): 用户 QQ 号 (即 onebot 适配器的用户 id)
-
-    Returns:
-        str: 头像文件路径
-    """
+    """`get_user_avatar(user_qq) -> str` returns the local path of a user's avatar."""
     try:
         return await user.get_avatar(user_qq, _ctx)
     except Exception as e:
@@ -426,41 +391,7 @@ async def view_str_content(
     max_len: int = 4096,
     show_line_num: bool = False,
 ) -> str:
-    """查看字符串内容，用于在运行时"看到"数据内容以进行分析和决策
-
-    适用场景：
-    - 查看读取的文件内容（Excel、CSV、文本文件等）
-    - 浏览处理后的数据结果
-    - 检查长字符串的具体内容
-
-    Args:
-        data_str (str): 要查看的数据字符串
-        start_line (int): 起始行号，从 1 开始 (Default: 1)
-        end_line (int): 结束行号，包含该行 (Default: 100)
-        max_len (int): 返回内容的最大字符数 (Default: 4096)
-        show_line_num (bool): 是否在每行前显示行号 (Default: False)
-
-    Returns:
-        str: 数据内容，包含元信息（总行数、是否截断等）
-
-    Example:
-        # 查看 Excel 文件内容
-        import pandas as pd
-        df = pd.read_excel("/shared/data.xlsx")
-        view_str_content(df.to_string())  # 查看前100行
-
-        # 分页浏览大数据
-        view_str_content(df.to_string(), start_line=101, end_line=200)  # 查看第101-200行
-
-        # 查看 CSV 文件
-        df = pd.read_csv("/shared/data.csv")
-        view_str_content(df.head(50).to_string())  # 推荐：先用 pandas 筛选再查看
-
-        # 查看文本文件内容并显示行号
-        with open("/shared/readme.txt", "r") as f:
-            content = f.read()
-        view_str_content(content, start_line=1, end_line=50, show_line_num=True)
-    """
+    """`view_str_content(data_str, start_line=1, end_line=100, max_len=4096, show_line_num=False)` inspects string or tabular content."""
     if not data_str:
         return "⚠️ 数据为空，没有内容可查看。"
 

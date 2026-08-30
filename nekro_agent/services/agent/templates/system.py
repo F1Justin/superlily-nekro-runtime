@@ -11,9 +11,6 @@ class RuntimeContractPrompt(PromptTemplate):
     platform_name: str
     bot_platform_id: str
     enable_cot: bool
-    chat_key_rules: str
-    enable_at: bool
-    plugin_activation_rules: str
 
 
 @register_template("persona.j2", "persona_prompt")

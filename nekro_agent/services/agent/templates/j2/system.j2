@@ -5,16 +5,15 @@
 
 {{ runtime_dynamic }}
 
-### Your Plugins:
+## Available Methods
+
 <plugins>
 {{ plugins_prompt }}
 </plugins>
 
-### FINAL OUTPUT CONTRACT
-Return the executable Python script body directly. Do not use Markdown code fences or
-backticks. Do not begin the script with `python`, `Python`, `py`, `code`, `script`, or
-any other language label. The executable script must begin with an actual Python
-statement such as `send_msg_text(...)`, `import ...`, an assignment, or a function
-call. Plugin documentation may contain fenced examples for readability; those fences
-and their language labels are documentation only and must never appear in your output.
+Methods marked `[AGENT METHOD - STOP AFTER CALL]` return information in a later iteration. After calling one, stop the current script immediately.
+
+## Final Output Contract
+
+Raw executable Python only. Begin with an actual Python statement; never begin with a language label, Markdown fence, or explanatory text.
 {% endmacro %}

@@ -15,7 +15,6 @@ from nekro_agent.models.db_exec_code import ExecStopType
 from nekro_agent.schemas.agent_ctx import AgentCtx
 from nekro_agent.schemas.chat_message import ChatMessage
 from nekro_agent.services.plugin.collector import plugin_collector
-from nekro_agent.services.plugin.prompt_activation import build_plugin_activation_rules
 from nekro_agent.services.sandbox.runner import limited_run_code
 
 from .creator import OpenAIChatMessage
@@ -30,13 +29,11 @@ from .templates.plugin import render_plugins_prompt
 logger = get_sub_logger("agent_runtime")
 RECENT_ERR_LOGS = deque(maxlen=100)
 
-
 def _summarize_runtime_text(text: str, limit: int = 160) -> str:
     compact = " ".join(text.strip().split())
     if not compact:
         return ""
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
-
 
 class AllLLMRequestsFailedError(ValueError):
     """All LLM API retries are exhausted for a single agent request."""
@@ -132,10 +129,7 @@ async def run_agent(
         chat_preset=preset.content,
         plugins_prompt=rendered_plugins.system_prompt,
         plugins_runtime_prompt=rendered_plugins.runtime_prompt,
-        plugin_activation_rules=build_plugin_activation_rules() if activation_enabled else "",
         enable_cot=used_model_group.ENABLE_COT,
-        chat_key_rules="\n".join(f"- {r}" for r in db_chat_channel.adapter.chat_key_rules),
-        enable_at=db_chat_channel.adapter.config.SESSION_ENABLE_AT,
     )
 
     messages = [prompt_compiler.render_system_message()]
@@ -161,6 +155,7 @@ async def run_agent(
             messages=messages,
             config=config,
             chat_key=chat_key,
+            enable_openrouter_web_search=used_model_group.ENABLE_OPENROUTER_WEB_SEARCH,
             on_llm_retry=lambda retry_index, retry_total, model_name, error_summary: publish_runtime_state(
                 phase="llm_retrying",
                 iteration_index=1,
@@ -374,6 +369,7 @@ async def send_agent_request(
     config: CoreConfig,
     is_debug_iteration: bool = False,
     chat_key: str = "",
+    enable_openrouter_web_search: bool = False,
     on_llm_attempt: Optional[Callable[[int, int, str], Awaitable[None]]] = None,
     on_llm_retry: Optional[Callable[[int, int, str, str], Awaitable[None]]] = None,
 ) -> Tuple[OpenAIResponse, ModelConfigGroup, list[str]]:
@@ -425,6 +421,11 @@ async def send_agent_request(
                 log_path=log_path,
                 error_log_path=err_log_path,
                 session_id=chat_key,
+                enable_openrouter_web_search=(
+                    enable_openrouter_web_search
+                    and use_model_group.ENABLE_OPENROUTER_WEB_SEARCH
+                    and not is_debug_iteration
+                ),
             )
         except Exception as e:
             error_summary = _summarize_runtime_text(str(e))

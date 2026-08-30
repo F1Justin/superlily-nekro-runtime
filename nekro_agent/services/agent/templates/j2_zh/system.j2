@@ -5,8 +5,15 @@
 
 {{ runtime_dynamic }}
 
-### 你的插件：
+## 可用方法
+
 <plugins>
 {{ plugins_prompt }}
 </plugins>
+
+标有 `[AGENT METHOD - STOP AFTER CALL]` 的方法会在后续迭代返回信息。调用后立刻结束当前脚本。
+
+## 最终输出契约
+
+只返回可执行的 Python 源码。以真实 Python 语句开头，不要以语言标签、Markdown 围栏或说明文字开头。
 {% endmacro %}

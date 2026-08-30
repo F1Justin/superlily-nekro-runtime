@@ -21,13 +21,25 @@ import aiofiles
 import httpx
 from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nekro_agent.core import config, logger
 
 from .creator import OpenAIChatMessage
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+_OPENROUTER_PARALLEL_TURBO_TOOL: Dict[str, Any] = {
+    "type": "openrouter:web_search",
+    "parameters": {
+        "engine": "parallel",
+        "mode": "turbo",
+        "max_results": 3,
+        "max_total_results": 3,
+        "max_characters": 1000,
+        "max_uses": 1,
+    },
+}
 
 
 def parse_extra_body(extra_body_json: Optional[str], source_hint: str = "") -> Optional[Dict[str, Any]]:
@@ -50,6 +62,100 @@ def parse_extra_body(extra_body_json: Optional[str], source_hint: str = "") -> O
         return None
 
 
+def build_openrouter_request_extra_body(
+    extra_body: Optional[Dict[str, Any]],
+    *,
+    is_openrouter: bool,
+    session_id: Optional[str],
+    enable_web_search: bool,
+) -> Optional[Dict[str, Any]]:
+    """构造 OpenRouter 专用的有界请求参数，不覆盖调用者已有工具配置。"""
+
+    body = dict(extra_body or {})
+    if enable_web_search and not is_openrouter:
+        raise ValueError("OpenRouter 网页搜索只能用于 openrouter.ai 请求")
+
+    if is_openrouter and session_id:
+        hashed_session_id = f"nekro-{hashlib.sha256(session_id.encode()).hexdigest()[:32]}"
+        body.setdefault("session_id", hashed_session_id)
+        metadata = dict(body.get("metadata") or {})
+        metadata.setdefault("session_id", hashed_session_id)
+        body["metadata"] = metadata
+
+    if enable_web_search:
+        if body.get("tools"):
+            raise ValueError("启用有界网页搜索时 EXTRA_BODY 不能同时提供自定义 tools")
+        if "max_tool_calls" in body and body["max_tool_calls"] != 1:
+            raise ValueError("启用有界网页搜索时 max_tool_calls 必须为 1")
+        body["tools"] = [_OPENROUTER_PARALLEL_TURBO_TOOL]
+        body["max_tool_calls"] = 1
+
+    return body or None
+
+
+def _response_value(source: Any, field: str, default: Any = None) -> Any:
+    if source is None:
+        return default
+    if isinstance(source, dict):
+        return source.get(field, default)
+    value = getattr(source, field, None)
+    if value is not None:
+        return value
+    model_extra = getattr(source, "model_extra", None)
+    return model_extra.get(field, default) if isinstance(model_extra, dict) else default
+
+
+def extract_url_citations(message: Any) -> tuple[List[Dict[str, Any]], int]:
+    """提取可持久化的 URL 引用元数据，丢弃网页正文但保留字符量遥测。"""
+
+    citations: List[Dict[str, Any]] = []
+    result_characters = 0
+    for annotation in _response_value(message, "annotations", []) or []:
+        if _response_value(annotation, "type", "") != "url_citation":
+            continue
+        item = _response_value(annotation, "url_citation", {}) or {}
+        url = str(_response_value(item, "url", "") or "").strip()
+        if not url:
+            continue
+        title = str(_response_value(item, "title", "") or "").strip()
+        content = str(_response_value(item, "content", "") or "")
+        result_characters += len(content)
+        citation: Dict[str, Any] = {"url": url}
+        if title:
+            citation["title"] = title
+        for field_name in ("start_index", "end_index"):
+            field_value = _response_value(item, field_name, None)
+            if isinstance(field_value, int):
+                citation[field_name] = field_value
+        if citation not in citations:
+            citations.append(citation)
+    return citations, result_characters
+
+
+def derive_web_search_observation(
+    server_tool_use: Dict[str, int],
+    *,
+    enable_web_search: bool,
+    url_citations: List[Dict[str, Any]],
+) -> tuple[Optional[int], int, bool, str]:
+    """分别保留供应商计数事实与由引用推断出的搜索观测。"""
+
+    reported_requests = server_tool_use.get("web_search_requests")
+    web_search_requests = int(reported_requests) if reported_requests is not None else None
+    citation_observed = enable_web_search and bool(url_citations)
+    inferred_requests = 1 if citation_observed and web_search_requests is None else 0
+    web_search_observed = bool((web_search_requests or 0) > 0 or citation_observed)
+    if web_search_requests is not None and citation_observed:
+        observation_source = "provider_usage+url_citation"
+    elif web_search_requests is not None:
+        observation_source = "provider_usage"
+    elif citation_observed:
+        observation_source = "url_citation"
+    else:
+        observation_source = ""
+    return web_search_requests, inferred_requests, web_search_observed, observation_source
+
+
 class OpenAIResponse(BaseModel):
     response_content: str  # 最终的回复内容
     thought_chain: str  # 思考链
@@ -62,6 +168,14 @@ class OpenAIResponse(BaseModel):
     token_cache_write: int = 0  # 缓存写入 token
     usage_cost: float = 0  # 供应商返回的实际费用
     cache_discount: float = 0  # 供应商返回的缓存折扣
+    server_tool_use: Dict[str, int] = Field(default_factory=dict)  # 服务端工具调用计数
+    web_search_offered: bool = False  # 本次请求是否向模型提供网页搜索
+    web_search_requests: Optional[int] = None  # 供应商报告的网页搜索请求数
+    web_search_inferred_requests: int = 0  # 由响应证据推断的网页搜索请求数
+    web_search_observed: bool = False  # 是否存在网页搜索已发生的响应证据
+    web_search_observation_source: str = ""  # 观测来源，不与供应商计数混合
+    web_search_result_characters: int = 0  # 搜索结果正文字符量（不持久化正文）
+    url_citations: List[Dict[str, Any]] = Field(default_factory=list)  # 可点击来源元数据
     use_model: str  # 使用的模型
     speed_tokens_per_second: float  # token 生成速度 / 秒
     first_token_cost_ms: int  # 首 token 生成时间
@@ -80,6 +194,12 @@ class OpenAIResponse(BaseModel):
                 f"缓存读取 token: {self.token_cached}\n"
                 f"缓存写入 token: {self.token_cache_write}\n"
                 f"实际费用: {self.usage_cost}\n"
+                f"网页搜索已提供: {self.web_search_offered}\n"
+                f"供应商报告的网页搜索请求: {self.web_search_requests}\n"
+                f"推断的网页搜索请求: {self.web_search_inferred_requests}\n"
+                f"网页搜索已观测: {self.web_search_observed}\n"
+                f"网页搜索观测来源: {self.web_search_observation_source}\n"
+                f"网页搜索结果字符: {self.web_search_result_characters}\n"
                 f"总生成时间: {self.generation_time_ms}ms\n"
                 f"生成速度: {self.speed_tokens_per_second} tokens/s\n"
                 f"首 token 生成时间: {self.first_token_cost_ms}ms\n"
@@ -92,6 +212,12 @@ class OpenAIResponse(BaseModel):
             f"Cached token: {self.token_cached}\n"
             f"Cache write token: {self.token_cache_write}\n"
             f"Actual cost: {self.usage_cost}\n"
+            f"Web search offered: {self.web_search_offered}\n"
+            f"Provider-reported web search requests: {self.web_search_requests}\n"
+            f"Inferred web search requests: {self.web_search_inferred_requests}\n"
+            f"Web search observed: {self.web_search_observed}\n"
+            f"Web search observation source: {self.web_search_observation_source}\n"
+            f"Web search result characters: {self.web_search_result_characters}\n"
             f"Total generation time: {self.generation_time_ms}ms\n"
             f"Token generation speed: {self.speed_tokens_per_second} tokens/s\n"
             f"First token cost: {self.first_token_cost_ms}ms\n"
@@ -125,6 +251,13 @@ class OpenAIResponse(BaseModel):
                 "token_cache_write": self.token_cache_write,
                 "usage_cost": self.usage_cost,
                 "cache_discount": self.cache_discount,
+                "server_tool_use": self.server_tool_use,
+                "web_search_offered": self.web_search_offered,
+                "web_search_requests": self.web_search_requests,
+                "web_search_inferred_requests": self.web_search_inferred_requests,
+                "web_search_observed": self.web_search_observed,
+                "web_search_observation_source": self.web_search_observation_source,
+                "web_search_result_characters": self.web_search_result_characters,
                 "generation_time_ms": self.generation_time_ms,
                 "speed_tokens_per_second": self.speed_tokens_per_second,
                 "first_token_cost_ms": self.first_token_cost_ms,
@@ -139,7 +272,11 @@ class OpenAIResponse(BaseModel):
                 "max_tokens": max_tokens,
                 "stop_words": stop_words,
             },
-            "response": {"content": self.response_content, "thought_chain": self.thought_chain},
+            "response": {
+                "content": self.response_content,
+                "thought_chain": self.thought_chain,
+                "url_citations": self.url_citations,
+            },
         }
 
     def _generate_text_log(
@@ -430,6 +567,7 @@ async def gen_openai_chat_response(
     error_log_path: Optional[Union[str, Path]] = None,
     log_style: Literal["json", "text", "auto"] = "auto",
     session_id: Optional[str] = None,
+    enable_openrouter_web_search: bool = False,
 ) -> OpenAIResponse:
     """生成聊天回复内容"""
 
@@ -449,6 +587,13 @@ async def gen_openai_chat_response(
     if isinstance(extra_body, str):
         extra_body = parse_extra_body(extra_body, source_hint=f"Model: {model}")
 
+    extra_body = build_openrouter_request_extra_body(
+        extra_body,
+        is_openrouter=is_openrouter,
+        session_id=session_id,
+        enable_web_search=enable_openrouter_web_search,
+    )
+
     gen_kwargs = {
         "temperature": temperature,
         "frequency_penalty": frequency_penalty,
@@ -464,13 +609,6 @@ async def gen_openai_chat_response(
             gen_kwargs["extra_body"] = {}
         gen_kwargs["extra_body"]["top_k"] = top_k
 
-    if is_openrouter and session_id:
-        if gen_kwargs["extra_body"] is None:
-            gen_kwargs["extra_body"] = {}
-        metadata = dict(gen_kwargs["extra_body"].get("metadata") or {})
-        metadata.setdefault("session_id", f"nekro-{hashlib.sha256(session_id.encode()).hexdigest()[:32]}")
-        gen_kwargs["extra_body"]["metadata"] = metadata
-
     # 去掉所有值为None的键
     gen_kwargs = {key: value for key, value in gen_kwargs.items() if value is not None}
 
@@ -483,6 +621,13 @@ async def gen_openai_chat_response(
     token_cache_write: int = 0
     usage_cost: float = 0
     cache_discount: float = 0
+    server_tool_use: Dict[str, int] = {}
+    web_search_requests: Optional[int] = None
+    web_search_inferred_requests: int = 0
+    web_search_observed: bool = False
+    web_search_observation_source: str = ""
+    web_search_result_characters: int = 0
+    url_citations: List[Dict[str, Any]] = []
     first_token_time: Optional[float] = None
 
     def _extract_valid_delta(chunk: ChatCompletionChunk) -> Optional[Any]:
@@ -495,30 +640,36 @@ async def gen_openai_chat_response(
             return None
         return delta
 
-    def _usage_value(source: Any, field: str, default: Any = 0) -> Any:
-        if source is None:
-            return default
-        if isinstance(source, dict):
-            return source.get(field, default)
-        value = getattr(source, field, None)
-        if value is not None:
-            return value
-        model_extra = getattr(source, "model_extra", None)
-        return model_extra.get(field, default) if isinstance(model_extra, dict) else default
-
     def _apply_usage(usage: Any) -> None:
         nonlocal token_consumption, token_input, token_output, token_cached, token_cache_write
-        nonlocal usage_cost, cache_discount
+        nonlocal usage_cost, cache_discount, server_tool_use, web_search_requests
         if not usage:
             return
-        token_consumption = int(_usage_value(usage, "total_tokens", token_consumption) or 0)
-        token_input = int(_usage_value(usage, "prompt_tokens", token_input) or 0)
-        token_output = int(_usage_value(usage, "completion_tokens", token_output) or 0)
-        prompt_details = _usage_value(usage, "prompt_tokens_details", None)
-        token_cached = int(_usage_value(prompt_details, "cached_tokens", token_cached) or 0)
-        token_cache_write = int(_usage_value(prompt_details, "cache_write_tokens", token_cache_write) or 0)
-        usage_cost = float(_usage_value(usage, "cost", usage_cost) or 0)
-        cache_discount = float(_usage_value(usage, "cache_discount", cache_discount) or 0)
+        token_consumption = int(_response_value(usage, "total_tokens", token_consumption) or 0)
+        token_input = int(_response_value(usage, "prompt_tokens", token_input) or 0)
+        token_output = int(_response_value(usage, "completion_tokens", token_output) or 0)
+        prompt_details = _response_value(usage, "prompt_tokens_details", None)
+        token_cached = int(_response_value(prompt_details, "cached_tokens", token_cached) or 0)
+        token_cache_write = int(_response_value(prompt_details, "cache_write_tokens", token_cache_write) or 0)
+        usage_cost = float(_response_value(usage, "cost", usage_cost) or 0)
+        cache_discount = float(_response_value(usage, "cache_discount", cache_discount) or 0)
+        raw_server_tool_use = _response_value(usage, "server_tool_use", {}) or {}
+        if not isinstance(raw_server_tool_use, dict):
+            model_dump = getattr(raw_server_tool_use, "model_dump", None)
+            raw_server_tool_use = model_dump() if callable(model_dump) else {}
+        server_tool_use = {
+            str(key): int(value) for key, value in raw_server_tool_use.items() if isinstance(value, (int, float))
+        }
+        reported_requests = server_tool_use.get("web_search_requests")
+        web_search_requests = int(reported_requests) if reported_requests is not None else None
+
+    def _apply_annotations(message: Any) -> None:
+        nonlocal web_search_result_characters
+        new_citations, new_result_characters = extract_url_citations(message)
+        web_search_result_characters += new_result_characters
+        for citation in new_citations:
+            if citation not in url_citations:
+                url_citations.append(citation)
 
     async def _apply_stream_chunk(chunk: ChatCompletionChunk) -> bool:
         nonlocal output, thought_chain, first_token_time
@@ -537,6 +688,7 @@ async def gen_openai_chat_response(
             output += chunk_text
         current_thought_chain = getattr(delta, thought_chain_field_name, "") or ""
         thought_chain += current_thought_chain
+        _apply_annotations(delta)
 
         if chunk_callback and await chunk_callback(
             OpenAIStreamChunk(
@@ -618,6 +770,7 @@ async def gen_openai_chat_response(
 
                 output = res.choices[0].message.content
                 thought_chain = getattr(res.choices[0].message, thought_chain_field_name, "") or ""
+                _apply_annotations(res.choices[0].message)
                 _apply_usage(res.usage)
 
     except Exception as e:
@@ -637,6 +790,19 @@ async def gen_openai_chat_response(
                 message_cnt=len(messages) + 1,
             )
         raise
+
+    # OpenRouter may expose only URL citations. Preserve that as inferred
+    # evidence instead of rewriting the absent provider-reported call count.
+    (
+        web_search_requests,
+        web_search_inferred_requests,
+        web_search_observed,
+        web_search_observation_source,
+    ) = derive_web_search_observation(
+        server_tool_use,
+        enable_web_search=enable_openrouter_web_search,
+        url_citations=url_citations,
+    )
 
     # 时间统计
     _end_time: float = time.time()
@@ -658,6 +824,14 @@ async def gen_openai_chat_response(
         token_cache_write=token_cache_write,
         usage_cost=usage_cost,
         cache_discount=cache_discount,
+        server_tool_use=server_tool_use,
+        web_search_offered=enable_openrouter_web_search,
+        web_search_requests=web_search_requests,
+        web_search_inferred_requests=web_search_inferred_requests,
+        web_search_observed=web_search_observed,
+        web_search_observation_source=web_search_observation_source,
+        web_search_result_characters=web_search_result_characters,
+        url_citations=url_citations,
         use_model=model,
         speed_tokens_per_second=_speed_tokens_per_second,
         first_token_cost_ms=_first_token_cost_ms or 0,

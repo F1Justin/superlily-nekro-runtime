@@ -47,6 +47,15 @@ class ModelConfigGroup(ConfigBase):
     PRESENCE_PENALTY: Optional[float] = Field(default=None, title="提示重复惩罚")
     FREQUENCY_PENALTY: Optional[float] = Field(default=None, title="补全重复惩罚")
     EXTRA_BODY: Optional[str] = Field(default=None, title="额外参数 (JSON)")
+    ENABLE_OPENROUTER_WEB_SEARCH: bool = Field(
+        default=False,
+        title="启用 OpenRouter 有界网页搜索",
+        description=(
+            "仅用于 OpenRouter Chat Completions。启用后向模型提供 Parallel Turbo 服务端搜索；"
+            "只有要求搜索、核实或呈现提问结构的触发消息会获得搜索工具；"
+            "每次初始回答最多搜索一次，Agent 调试迭代不会再次提供搜索工具。"
+        ),
+    )
 
 
 class CoreConfig(ConfigBase):

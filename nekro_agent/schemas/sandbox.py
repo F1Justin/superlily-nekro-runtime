@@ -1,6 +1,6 @@
 import json
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nekro_agent.services.agent.openai import OpenAIResponse
 
@@ -14,6 +14,14 @@ class SandboxCodeExtData(BaseModel):
     token_cache_write: int = 0
     usage_cost: float = 0
     cache_discount: float = 0
+    server_tool_use: dict[str, int] = Field(default_factory=dict)
+    web_search_offered: bool = False
+    web_search_requests: int | None = None
+    web_search_inferred_requests: int = 0
+    web_search_observed: bool = False
+    web_search_observation_source: str = ""
+    web_search_result_characters: int = 0
+    url_citations: list[dict] = Field(default_factory=list)
     chars_count_input: int
     chars_count_output: int
     chars_count_total: int
@@ -65,6 +73,14 @@ class SandboxCodeExtData(BaseModel):
             token_cache_write=llm_response.token_cache_write,
             usage_cost=llm_response.usage_cost,
             cache_discount=llm_response.cache_discount,
+            server_tool_use=llm_response.server_tool_use,
+            web_search_offered=llm_response.web_search_offered,
+            web_search_requests=llm_response.web_search_requests,
+            web_search_inferred_requests=llm_response.web_search_inferred_requests,
+            web_search_observed=llm_response.web_search_observed,
+            web_search_observation_source=llm_response.web_search_observation_source,
+            web_search_result_characters=llm_response.web_search_result_characters,
+            url_citations=llm_response.url_citations,
             chars_count_input=chars_count_input,
             chars_count_output=chars_count_output,
             chars_count_total=chars_count_total,

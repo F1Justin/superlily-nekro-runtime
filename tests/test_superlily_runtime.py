@@ -113,13 +113,10 @@ def test_runtime_contract_teaches_raw_python_without_language_fences() -> None:
         platform_name="QQ",
         bot_platform_id="123",
         enable_cot=False,
-        chat_key_rules="Use the current chat key.",
-        enable_at=False,
-        plugin_activation_rules="",
     ).render(prompt_env)
 
-    assert "OUTPUT RAW EXECUTABLE PYTHON SOURCE ONLY" in prompt
-    assert "Never write a\nlanguage label" in prompt
+    assert "Output only the script body" in prompt
+    assert "Begin with a real Python statement" in prompt
     assert "```python\nsend_msg_text" not in prompt
     assert "```python\nagent_method" not in prompt
     assert "```python\nplt.savefig" not in prompt
@@ -133,8 +130,8 @@ def test_final_output_contract_follows_plugin_documentation() -> None:
         plugins_prompt="```python\nplugin_example()\n```",
     ).render(prompt_env)
 
-    assert prompt.rfind("### FINAL OUTPUT CONTRACT") > prompt.rfind("</plugins>")
-    assert "those fences\nand their language labels are documentation only" in prompt
+    assert prompt.rfind("## Final Output Contract") > prompt.rfind("</plugins>")
+    assert "Raw executable Python only" in prompt
 
 
 def test_reply_focus_ids_come_from_the_exact_trigger_message() -> None:
@@ -229,10 +226,7 @@ async def test_prompt_compiler_forwards_exact_reply_focus_ids() -> None:
         chat_preset="persona",
         plugins_prompt="",
         plugins_runtime_prompt="",
-        plugin_activation_rules="",
         enable_cot=False,
-        chat_key_rules="",
-        enable_at=False,
     )
     rendered_history = OpenAIChatMessage.from_text("user", "history")
     with patch(

@@ -1,34 +1,15 @@
-{% macro plugin_prompt(plugin_name, module_name, state, rounds_left, activation_hint, plugin_brief, plugin_injected_prompt, plugin_method_prompt) %}
+{% macro plugin_prompt(plugin_name, module_name, state, rounds_left, activation_hint, plugin_brief, plugin_injected_prompt, plugin_method_prompt) -%}
 <plugin name="{{ plugin_name }}" module_name="{{ module_name }}" state="{{ state }}"{% if rounds_left is not none %} rounds_left="{{ rounds_left }}"{% endif %}>
-
-{% if state == "sleeping" and plugin_brief %}
-<capability_brief>
+{% if state == "sleeping" and plugin_brief %}<capability_brief>
 {{ plugin_brief }}
 </capability_brief>
-{% endif %}
-
-{% if state == "sleeping" %}
-<activation_rule>
-Summary only. Do not guess hidden details. Activate if needed.
-</activation_rule>
-{% endif %}
-
-{% if state == "active" and rounds_left == 1 and activation_hint %}
-<activation_rule>
-{{ activation_hint }}
-</activation_rule>
-{% endif %}
-
-{% if plugin_injected_prompt %}
-<injected_prompt>
+{% endif %}{% if state == "sleeping" %}<activation_rule>Summary only. Activate before relying on hidden details.</activation_rule>
+{% endif %}{% if state == "active" and rounds_left == 1 and activation_hint %}<activation_rule>{{ activation_hint }}</activation_rule>
+{% endif %}{% if plugin_injected_prompt %}<injected_prompt>
 {{ plugin_injected_prompt }}
 </injected_prompt>
-{% endif %}
-{% if plugin_method_prompt %}
-<predefined_methods>
+{% endif %}{% if plugin_method_prompt %}<predefined_methods>
 {{ plugin_method_prompt }}
 </predefined_methods>
-{% endif %}
-
-</plugin>
-{% endmacro %}
+{% endif %}</plugin>
+{%- endmacro %}
