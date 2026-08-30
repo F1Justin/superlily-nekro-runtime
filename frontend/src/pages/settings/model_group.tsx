@@ -208,6 +208,7 @@ function EditDialog({
         ENABLE_VISION:
           initialConfig.ENABLE_VISION !== undefined ? initialConfig.ENABLE_VISION : true,
         ENABLE_COT: initialConfig.ENABLE_COT !== undefined ? initialConfig.ENABLE_COT : false,
+        ENABLE_OPENROUTER_WEB_SEARCH: initialConfig.ENABLE_OPENROUTER_WEB_SEARCH ?? false,
       })
     } else {
       setConfig({
@@ -224,6 +225,7 @@ function EditDialog({
         EXTRA_BODY: null,
         ENABLE_VISION: true,
         ENABLE_COT: false,
+        ENABLE_OPENROUTER_WEB_SEARCH: false,
       })
     }
   }, [initialConfig, open, isCopy])
@@ -595,6 +597,28 @@ function EditDialog({
                     label={
                       <Typography sx={{ fontSize: isSmall ? '0.8rem' : 'inherit' }}>
                         {t('modelGroup.form.cot')}
+                      </Typography>
+                    }
+                  />
+                </div>
+              </Tooltip>
+
+              <Tooltip title={t('modelGroup.helpers.webSearch')}>
+                <div>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={config.ENABLE_OPENROUTER_WEB_SEARCH}
+                        onChange={e =>
+                          setConfig({ ...config, ENABLE_OPENROUTER_WEB_SEARCH: e.target.checked })
+                        }
+                        color="primary"
+                        size={isSmall ? 'small' : 'medium'}
+                      />
+                    }
+                    label={
+                      <Typography sx={{ fontSize: isSmall ? '0.8rem' : 'inherit' }}>
+                        {t('modelGroup.form.webSearch')}
                       </Typography>
                     }
                   />

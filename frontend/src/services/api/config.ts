@@ -35,6 +35,7 @@ export interface ModelGroupConfig {
   EXTRA_BODY?: string | null
   ENABLE_VISION?: boolean
   ENABLE_COT?: boolean
+  ENABLE_OPENROUTER_WEB_SEARCH?: boolean
 }
 
 export interface ModelTypeOption {

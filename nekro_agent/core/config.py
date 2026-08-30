@@ -52,7 +52,7 @@ class ModelConfigGroup(ConfigBase):
         title="启用 OpenRouter 有界网页搜索",
         description=(
             "仅用于 OpenRouter Chat Completions。启用后向模型提供 Parallel Turbo 服务端搜索；"
-            "只有要求搜索、核实或呈现提问结构的触发消息会获得搜索工具；"
+            "每个初始请求都统一提供搜索工具，是否调用由模型判断；"
             "每次初始回答最多搜索一次，Agent 调试迭代不会再次提供搜索工具。"
         ),
     )
