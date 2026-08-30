@@ -27,12 +27,76 @@ from nekro_agent.adapters.onebot_v11.tools.onebot_util import (
 )
 from nekro_agent.core import config, logger
 from nekro_agent.models.db_chat_channel import DBChatChannel
+from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_user import DBUser
 from nekro_agent.schemas.chat_message import ChatMessageSegmentForward
 
 
-def register_matcher(adapter: BaseAdapter):
+async def _build_reply_ext(
+    event: Union[MessageEvent, GroupMessageEvent],
+    bot: Bot,
+    db_chat_channel: DBChatChannel,
+    adapter: BaseAdapter,
+) -> PlatformMessageExt:
+    ref_msg_id = await get_message_reply_info(event=event)
+    if not ref_msg_id or event.reply is None:
+        return PlatformMessageExt(ref_msg_id=ref_msg_id)
+    if await DBChatMessage.filter(
+        chat_key=db_chat_channel.chat_key,
+        message_id=ref_msg_id,
+    ).exists():
+        return PlatformMessageExt(
+            ref_msg_id=ref_msg_id,
+            ref_sender_id=str(event.reply.sender.user_id),
+        )
 
+    try:
+        reply_data = event.model_dump()
+        reply_data.update(
+            {
+                "time": event.reply.time,
+                "user_id": event.reply.sender.user_id,
+                "message_id": event.reply.message_id,
+                "message": event.reply.message,
+                "original_message": event.reply.message,
+                "raw_message": str(event.reply.message),
+                "sender": event.reply.sender,
+                "to_me": False,
+                "reply": None,
+            },
+        )
+        reply_event = type(event).model_validate(reply_data)
+        content_data, _, _ = await convert_chat_message(
+            reply_event,
+            False,
+            bot,
+            db_chat_channel,
+            adapter,
+        )
+        content_text, _ = await gen_chat_text(
+            event=reply_event,
+            bot=bot,
+            db_chat_channel=db_chat_channel,
+        )
+        sender_name = event.reply.sender.card or event.reply.sender.nickname or str(event.reply.sender.user_id)
+        return PlatformMessageExt(
+            ref_msg_id=ref_msg_id,
+            ref_sender_id=str(event.reply.sender.user_id),
+            ref_sender_name=sender_name,
+            ref_content_text=content_text[:4096],
+            ref_content_data=[segment.model_dump(mode="json") for segment in content_data[:16]],
+            ref_send_timestamp=event.reply.time,
+        )
+    # Reply enrichment must never make an otherwise valid incoming message disappear.
+    except Exception as exc:
+        logger.warning(f"构造引用消息快照失败 (message_id={ref_msg_id}): {exc}")
+        return PlatformMessageExt(
+            ref_msg_id=ref_msg_id,
+            ref_sender_id=str(event.reply.sender.user_id),
+        )
+
+
+def register_matcher(adapter: BaseAdapter):
     @on_message(priority=99999, block=False).handle()
     async def _(_: Matcher, event: Union[MessageEvent, GroupMessageEvent], bot: Bot):
         """消息匹配器"""
@@ -60,7 +124,9 @@ def register_matcher(adapter: BaseAdapter):
         )
 
         # 消息内容处理
-        content_data, msg_tome, message_id = await convert_chat_message(event, event.to_me, bot, db_chat_channel, adapter)
+        content_data, msg_tome, message_id = await convert_chat_message(
+            event, event.to_me, bot, db_chat_channel, adapter
+        )
         if not content_data:  # 忽略无法转换的消息
             logger.warning(f"无法转换的消息: {event.get_plaintext()}")
             return
@@ -88,7 +154,7 @@ def register_matcher(adapter: BaseAdapter):
             logger.info(f"忽略前缀匹配的消息: {content_text[:32]}...")
             return
 
-        ref_msg_id = await get_message_reply_info(event=event)
+        reply_ext = await _build_reply_ext(event, bot, db_chat_channel, adapter)
 
         plt_msg: PlatformMessage = PlatformMessage(
             message_id=message_id,
@@ -99,7 +165,7 @@ def register_matcher(adapter: BaseAdapter):
             content_text=content_text,
             is_tome=bool(is_tome or msg_tome),
             timestamp=int(time.time()),
-            ext_data=PlatformMessageExt(ref_msg_id=ref_msg_id),
+            ext_data=reply_ext,
         )
 
         # 提交收集消息

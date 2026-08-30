@@ -111,8 +111,12 @@ class PromptCompiler:
         one_time_code: str,
         config: CoreConfig,
         model_group: ModelConfigGroup,
+        focus_message_id: Optional[str] = None,
+        focus_reference_message_id: Optional[str] = None,
     ) -> OpenAIChatMessage:
-        return OpenAIChatMessage.from_template("user", HistoryFirstStart(enable_cot=self.enable_cot), default_env).extend(
+        return OpenAIChatMessage.from_template(
+            "user", HistoryFirstStart(enable_cot=self.enable_cot), default_env
+        ).extend(
             await render_history_data(
                 chat_key=chat_key,
                 db_chat_channel=db_chat_channel,
@@ -120,5 +124,7 @@ class PromptCompiler:
                 plugin_injected_prompt=self.plugins_runtime_prompt,
                 model_group=model_group,
                 config=config,
+                focus_message_id=focus_message_id,
+                focus_reference_message_id=focus_reference_message_id,
             ),
         )

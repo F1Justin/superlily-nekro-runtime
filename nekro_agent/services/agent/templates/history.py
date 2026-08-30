@@ -2,17 +2,20 @@ import datetime
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from lunar_python import Lunar
 from pydantic import ValidationError
 
+from nekro_agent.adapters.interface.schemas.extra import PlatformMessageExt
 from nekro_agent.core.config import CoreConfig, ModelConfigGroup, config
 from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.models.db_chat_channel import DBChatChannel
-from nekro_agent.models.db_chat_message import DBChatMessage
+from nekro_agent.models.db_chat_message import DBChatMessage, convert_raw_msg_data_json_to_msg_prompt
 from nekro_agent.schemas.chat_message import (
     ChatMessageSegmentImage,
+    segments_from_list,
 )
 from nekro_agent.services.memory.feature_flags import is_memory_system_enabled
 from nekro_agent.services.memory.recall_contract import (
@@ -25,7 +28,7 @@ from nekro_agent.services.memory.recall_contract import (
     MemoryTypeHint,
     build_enhanced_recall_user_prompt,
 )
-from nekro_agent.tools.common_util import compress_image
+from nekro_agent.tools.common_util import compress_image, limited_text_output
 from nekro_agent.tools.path_convertor import (
     convert_filename_to_access_path,
     convert_filename_to_sandbox_upload_path,
@@ -76,7 +79,15 @@ def _message_information_score(message: DBChatMessage) -> float:
     ref_bonus = 0.15 if message.ext_data_obj.ref_msg_id else 0.0
     recency_bias = 0.18
 
-    return round(length_score * 0.42 + diversity_score * 0.22 + semantic_density * 0.18 + sentence_bonus + ref_bonus + recency_bias, 4)
+    return round(
+        length_score * 0.42
+        + diversity_score * 0.22
+        + semantic_density * 0.18
+        + sentence_bonus
+        + ref_bonus
+        + recency_bias,
+        4,
+    )
 
 
 def _select_focus_message(non_bot_messages: list[DBChatMessage]) -> DBChatMessage:
@@ -93,7 +104,14 @@ def _select_focus_message(non_bot_messages: list[DBChatMessage]) -> DBChatMessag
 def _build_default_rule_plan(
     focus_points: list[str],
     context_texts: list[str],
-) -> tuple[MemoryIntentType, MemoryAnswerStyle, list[MemoryTypeHint], list[MemoryKnowledgeHint], list[MemoryKnowledgeHint], list[str]]:
+) -> tuple[
+    MemoryIntentType,
+    MemoryAnswerStyle,
+    list[MemoryTypeHint],
+    list[MemoryKnowledgeHint],
+    list[MemoryKnowledgeHint],
+    list[str],
+]:
     del focus_points
     return (
         MemoryIntentType.MIXED,
@@ -114,9 +132,7 @@ def _build_rule_based_memory_recall_query(recent_messages: List[DBChatMessage]) 
     3. 临近上下文中的关键句
     """
     non_bot_messages = [
-        msg
-        for msg in recent_messages
-        if msg.sender_id != "-1" and msg.content_text and msg.content_text.strip()
+        msg for msg in recent_messages if msg.sender_id != "-1" and msg.content_text and msg.content_text.strip()
     ]
     if not non_bot_messages:
         logger.debug("规则记忆检索规划跳过: 最近消息中没有可用的非机器人文本")
@@ -202,10 +218,13 @@ async def _build_enhanced_memory_recall_plan(recent_messages: List[DBChatMessage
 
         model_group_name = config.MEMORY_ENHANCED_RETRIEVAL_MODEL_GROUP or config.USE_MODEL_GROUP
         model_group = config.get_model_group_info(model_group_name)
-        extra_body = parse_extra_body(
-            model_group.EXTRA_BODY,
-            source_hint=f"Enhanced memory retrieval model group: {model_group_name}",
-        ) or {}
+        extra_body = (
+            parse_extra_body(
+                model_group.EXTRA_BODY,
+                source_hint=f"Enhanced memory retrieval model group: {model_group_name}",
+            )
+            or {}
+        )
         extra_body.setdefault("response_format", {"type": "json_object"})
 
         response = await gen_openai_chat_response(
@@ -273,8 +292,7 @@ async def _build_memory_recall_plan(recent_messages: List[DBChatMessage]) -> Mem
         entity_hints,
     ) = _build_default_rule_plan(fallback_query.focus_points, fallback_query.context_texts)
     logger.debug(
-        f"记忆检索规划采用规则模式: intent={intent_type}, "
-        f"query={_preview_text(fallback_query.query_text)}",
+        f"记忆检索规划采用规则模式: intent={intent_type}, query={_preview_text(fallback_query.query_text)}",
     )
     return MemoryRecallPlan(
         intent_type=intent_type,
@@ -323,8 +341,7 @@ async def _inject_memory_context(
         recall_plan = await _build_memory_recall_plan(recent_messages)
         if not recall_plan.queries:
             logger.debug(
-                f"跳过记忆注入: 未生成可用检索计划, workspace={workspace_id}, "
-                f"recent_messages={len(recent_messages)}",
+                f"跳过记忆注入: 未生成可用检索计划, workspace={workspace_id}, recent_messages={len(recent_messages)}",
             )
             return ""
 
@@ -429,8 +446,7 @@ async def _inject_memory_context(
         )
         if not memory_context:
             logger.debug(
-                f"跳过记忆注入: 记忆编排结果为空, workspace={workspace_id}, "
-                f"deduped_memories={len(memories)}",
+                f"跳过记忆注入: 记忆编排结果为空, workspace={workspace_id}, deduped_memories={len(memories)}",
             )
             return ""
         logger.debug(
@@ -463,18 +479,160 @@ class HistoryPrompt(PromptTemplate):
     lunar_time: str
 
 
+@dataclass(frozen=True)
+class ReplyFocus:
+    trigger_message: DBChatMessage
+    referenced_message: Optional[DBChatMessage]
+    referenced_message_id: str
+
+
 def _select_recent_chat_messages(
     messages_newest_first: List[DBChatMessage],
     max_length: int,
-    referenced_message: Optional[DBChatMessage],
+    reserved_messages: Tuple[DBChatMessage, ...] = (),
 ) -> List[DBChatMessage]:
     if max_length <= 0:
         return []
 
-    selected = messages_newest_first[::-1][-max_length:]
-    if referenced_message and max_length >= 2 and all(msg.id != referenced_message.id for msg in selected):
-        selected = [referenced_message, *selected[-(max_length - 1) :]]
-        selected.sort(key=lambda msg: (msg.send_timestamp, msg.id))
+    reserved_ids = {message.id for message in reserved_messages}
+    selected = [message for message in messages_newest_first if message.id not in reserved_ids][:max_length]
+    return sorted(selected, key=lambda message: (message.send_timestamp, message.id))
+
+
+async def _resolve_reply_focus(
+    *,
+    chat_key: str,
+    recent_messages_newest_first: List[DBChatMessage],
+    focus_message_id: Optional[str],
+    focus_reference_message_id: Optional[str],
+) -> Optional[ReplyFocus]:
+    trigger_message: Optional[DBChatMessage] = None
+    if focus_message_id:
+        trigger_message = (
+            await DBChatMessage.filter(chat_key=chat_key, message_id=focus_message_id).order_by("-id").first()
+        )
+        if trigger_message is None:
+            logger.warning(f"无法按精确 ID 找到触发消息，跳过引用焦点: chat_key={chat_key}, message_id={focus_message_id}")
+            return None
+    else:
+        trigger_message = next((message for message in recent_messages_newest_first if not message.is_system), None)
+    if trigger_message is None:
+        return None
+
+    referenced_message_id = focus_reference_message_id or trigger_message.ext_data_obj.ref_msg_id
+    if not referenced_message_id:
+        return None
+
+    referenced_message = await (
+        DBChatMessage.filter(chat_key=chat_key, message_id=referenced_message_id).order_by("-id").first()
+    )
+    return ReplyFocus(
+        trigger_message=trigger_message,
+        referenced_message=referenced_message,
+        referenced_message_id=referenced_message_id,
+    )
+
+
+def _reply_snapshot_prompt(
+    *,
+    ext_data: PlatformMessageExt,
+    referenced_message_id: str,
+    one_time_code: str,
+    config: CoreConfig,
+) -> str:
+    if not ext_data.ref_content_data and not ext_data.ref_content_text:
+        return f"[Quoted message unavailable: msg_id:{referenced_message_id}]"
+
+    content = ext_data.ref_content_text
+    if ext_data.ref_content_data:
+        content = convert_raw_msg_data_json_to_msg_prompt(
+            json.dumps(ext_data.ref_content_data, ensure_ascii=False),
+            one_time_code,
+            config,
+        )
+    content = limited_text_output(
+        content,
+        config.AI_CONTEXT_LENGTH_PER_MESSAGE,
+        placeholder="(content too long, omitted)",
+    )
+    time_prefix = ""
+    if ext_data.ref_send_timestamp:
+        time_prefix = datetime.datetime.fromtimestamp(ext_data.ref_send_timestamp).strftime("[%m-%d %H:%M:%S] ")
+    sender = ext_data.ref_sender_name or ext_data.ref_sender_id or "unknown sender"
+    return f'(msg_id:{referenced_message_id}){time_prefix}"{sender}" said: {content}'
+
+
+def _render_reply_focus_prompt(reply_focus: ReplyFocus, one_time_code: str, config: CoreConfig) -> str:
+    trigger_ext = reply_focus.trigger_message.ext_data_obj
+    quoted_prompt = (
+        reply_focus.referenced_message.parse_chat_history_prompt(one_time_code, config, ref_mode=True)
+        if reply_focus.referenced_message
+        else _reply_snapshot_prompt(
+            ext_data=trigger_ext,
+            referenced_message_id=reply_focus.referenced_message_id,
+            one_time_code=one_time_code,
+            config=config,
+        )
+    )
+    trigger_prompt = reply_focus.trigger_message.parse_chat_history_prompt(one_time_code, config, ref_mode=True)
+    return (
+        "Reply Focus (authoritative context for the current request):\n"
+        f"Quoted message:\n{quoted_prompt}\n"
+        f"Current request:\n{trigger_prompt}\n"
+        "End Reply Focus.\n\n"
+    )
+
+
+def _message_images(message: DBChatMessage) -> List[ChatMessageSegmentImage]:
+    return [segment for segment in message.parse_content_data() if isinstance(segment, ChatMessageSegmentImage)]
+
+
+def _reply_snapshot_images(reply_focus: ReplyFocus) -> List[ChatMessageSegmentImage]:
+    if reply_focus.referenced_message:
+        return _message_images(reply_focus.referenced_message)
+    try:
+        return [
+            segment
+            for segment in segments_from_list(reply_focus.trigger_message.ext_data_obj.ref_content_data)
+            if isinstance(segment, ChatMessageSegmentImage)
+        ]
+    except (KeyError, TypeError, ValueError, ValidationError):
+        return []
+
+
+def _select_history_images(
+    *,
+    reply_focus: Optional[ReplyFocus],
+    recent_messages: List[DBChatMessage],
+    reply_limit: int,
+    recent_limit: int,
+) -> List[Tuple[ChatMessageSegmentImage, str]]:
+    selected: List[Tuple[ChatMessageSegmentImage, str]] = []
+    seen: Set[str] = set()
+
+    def append_unique(images: List[ChatMessageSegmentImage], source: str, limit: int) -> None:
+        added = 0
+        for image in images:
+            key = image.file_name or image.remote_url or image.local_path or repr(image)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append((image, source))
+            added += 1
+            if added >= limit:
+                break
+
+    if reply_focus:
+        append_unique(_reply_snapshot_images(reply_focus), "reply_focus", reply_limit)
+
+    ordinary_start = len(selected)
+    if reply_focus:
+        append_unique(_message_images(reply_focus.trigger_message), "current_request", recent_limit)
+    for message in reversed(recent_messages):
+        remaining_recent_slots = max(0, recent_limit - (len(selected) - ordinary_start))
+        if not remaining_recent_slots:
+            break
+        append_unique(_message_images(message), "recent_history", remaining_recent_slots)
     return selected
 
 
@@ -486,6 +644,8 @@ async def render_history_data(
     plugin_injected_prompt: str = "",
     record_sta_timestamp: Optional[float] = None,
     model_group: Optional[ModelConfigGroup] = None,
+    focus_message_id: Optional[str] = None,
+    focus_reference_message_id: Optional[str] = None,
 ) -> OpenAIChatMessage:
     if record_sta_timestamp is None:
         record_sta_timestamp = int(time.time() - config.AI_CHAT_CONTEXT_EXPIRE_SECONDS)
@@ -513,20 +673,28 @@ async def render_history_data(
                 _to_remove_msgs.append(msg)
     recent_chat_messages = [msg for msg in recent_chat_messages if msg not in _to_remove_msgs]
 
-    # Keep the newest trigger and its direct reply target before filling the
-    # remaining slots with ordinary recent history.
-    newest_user_message = next((msg for msg in recent_chat_messages if not msg.is_system), None)
-    referenced_message: Optional[DBChatMessage] = None
-    if newest_user_message and newest_user_message.ext_data_obj.ref_msg_id:
-        referenced_message = await DBChatMessage.filter(
-            chat_key=chat_key,
-            message_id=newest_user_message.ext_data_obj.ref_msg_id,
-        ).first()
-
+    reply_focus = await _resolve_reply_focus(
+        chat_key=chat_key,
+        recent_messages_newest_first=recent_chat_messages,
+        focus_message_id=focus_message_id,
+        focus_reference_message_id=focus_reference_message_id,
+    )
+    reserved_messages = (
+        tuple(
+            message
+            for message in (
+                reply_focus.referenced_message,
+                reply_focus.trigger_message,
+            )
+            if message is not None
+        )
+        if reply_focus
+        else ()
+    )
     recent_chat_messages = _select_recent_chat_messages(
         recent_chat_messages,
         config.AI_CHAT_CONTEXT_MAX_LENGTH,
-        referenced_message,
+        reserved_messages,
     )
 
     # 预先构建包含 plugin_injected_prompt 的基础消息，无论是否有历史记录都需要保留注入提示词
@@ -541,22 +709,19 @@ async def render_history_data(
         env,
     )
 
-    if not recent_chat_messages:
+    if not recent_chat_messages and not reply_focus:
         return base_message.extend(OpenAIChatMessage.from_text("user", "[Not new message revived yet]"))
 
-    # 提取并构造图片片段
-    image_segments: List[ChatMessageSegmentImage] = []
-    for db_message in recent_chat_messages:
-        for seg in db_message.parse_content_data():
-            if isinstance(seg, ChatMessageSegmentImage):
-                image_segments.append(seg)
-
-    img_seg_pairs: List[Tuple[str, Dict[str, Any]]] = []
+    selected_images = _select_history_images(
+        reply_focus=reply_focus,
+        recent_messages=recent_chat_messages,
+        reply_limit=config.AI_VISION_REPLY_IMAGE_LIMIT,
+        recent_limit=config.AI_VISION_IMAGE_LIMIT,
+    )
+    img_seg_pairs: List[Tuple[str, Dict[str, Any], str]] = []
     img_seg_set: Set[str] = set()
-    if image_segments and model_group.ENABLE_VISION:
-        for seg in image_segments[::-1]:
-            if len(img_seg_set) >= config.AI_VISION_IMAGE_LIMIT:
-                break
+    if selected_images and model_group.ENABLE_VISION:
+        for seg, source in selected_images:
             if seg.local_path:
                 if seg.file_name in img_seg_set:
                     continue
@@ -577,6 +742,7 @@ async def render_history_data(
                         (
                             f"<{one_time_code} | Image:{convert_filename_to_sandbox_upload_path(seg.file_name)}>",
                             ContentSegment.image_content_from_path(str(compressed_path)),
+                            source,
                         ),
                     )
                     logger.info(f"压缩图片: {access_path.name} -> {compressed_path.stat().st_size / 1024}KB")
@@ -585,6 +751,7 @@ async def render_history_data(
                         (
                             f"<{one_time_code} | Image:{convert_filename_to_sandbox_upload_path(seg.file_name)}>",
                             ContentSegment.image_content_from_path(str(access_path)),
+                            source,
                         ),
                     )
             elif seg.remote_url:
@@ -595,6 +762,7 @@ async def render_history_data(
                     (
                         f"<{one_time_code} | Image:{seg.remote_url}>",
                         ContentSegment.image_content(seg.remote_url),
+                        source,
                     ),
                 )
             else:
@@ -602,22 +770,24 @@ async def render_history_data(
 
     openai_chat_message: OpenAIChatMessage = base_message
 
-    logger.debug(f"已加载到 {len(img_seg_pairs)} 张图片")
-    img_seg_pairs = img_seg_pairs[::-1]  # 反转得到正确排序的 描述-图片 对
+    reply_image_count = sum(source == "reply_focus" for _, _, source in img_seg_pairs)
+    recent_image_count = len(img_seg_pairs) - reply_image_count
+    logger.debug(f"已加载引用焦点图片 {reply_image_count} 张、普通历史图片 {recent_image_count} 张")
 
     if img_seg_pairs:
         openai_chat_message.add(
             ContentSegment.text_content(
                 f'<{one_time_code} | recent_chat_images count="{len(img_seg_pairs)}">\n'
-                "Match each image to its corresponding message in Recent Messages by the path reference.\n\n",
+                "Match each image to its corresponding path reference in Reply Focus or Recent Messages. "
+                "Only images attached in this block contain visual pixels; other Image placeholders are metadata only.\n\n",
             ),
         )
-        for _idx, (img_seg_prompt, img_seg_content) in enumerate(img_seg_pairs, 1):
+        for _idx, (img_seg_prompt, img_seg_content, source) in enumerate(img_seg_pairs, 1):
             # 从 img_seg_prompt 中提取路径: "<code | Image:path>" -> "path"
             img_path = img_seg_prompt.split("Image:")[-1].rstrip(">")
             openai_chat_message.add(
                 ContentSegment.text_content(
-                    f'<{one_time_code} | image path="{img_path}">\n',
+                    f'<{one_time_code} | image path="{img_path}" source="{source}">\n',
                 ),
             )
             openai_chat_message.add(img_seg_content)
@@ -633,15 +803,21 @@ async def render_history_data(
         )
 
     # 注入记忆上下文
+    memory_messages = [*reserved_messages, *recent_chat_messages]
     memory_context = await _inject_memory_context(
         workspace_id=db_chat_channel.workspace_id,
-        recent_messages=recent_chat_messages,
+        recent_messages=memory_messages,
     )
     if memory_context:
         logger.debug(f"历史提示词已注入记忆块: workspace={db_chat_channel.workspace_id}, length={len(memory_context)}")
         openai_chat_message.add(ContentSegment.text_content(memory_context))
     else:
         logger.debug(f"历史提示词未注入记忆块: workspace={db_chat_channel.workspace_id}")
+
+    if reply_focus:
+        openai_chat_message.add(
+            ContentSegment.text_content(_render_reply_focus_prompt(reply_focus, one_time_code, config)),
+        )
 
     openai_chat_message.add(
         ContentSegment.text_content(
@@ -680,6 +856,20 @@ async def render_history_data(
     chat_history_prompt += f"\n<{one_time_code} | message separator>\n"
     openai_chat_message.add(ContentSegment.text_content(chat_history_prompt))
 
-    logger.info(f"加载最近 {len(recent_chat_messages)} 条对话记录 ({len(ref_msg_set)} 条引用相关消息)")
+    focus_status = "none"
+    if reply_focus:
+        if reply_focus.referenced_message:
+            focus_status = "database"
+        elif (
+            reply_focus.trigger_message.ext_data_obj.ref_content_data
+            or reply_focus.trigger_message.ext_data_obj.ref_content_text
+        ):
+            focus_status = "snapshot"
+        else:
+            focus_status = "unavailable"
+    logger.info(
+        f"加载普通历史 {len(chat_history_prompts)} 条，引用焦点={focus_status} "
+        f"(引用图片={reply_image_count}, 普通图片={recent_image_count})",
+    )
 
     return openai_chat_message

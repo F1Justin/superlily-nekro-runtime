@@ -6,6 +6,7 @@ from collections import deque
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
+from nekro_agent.adapters.interface.schemas.extra import PlatformMessageExt
 from nekro_agent.core.config import CoreConfig, ModelConfigGroup
 from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.core.os_env import PROMPT_ERROR_LOG_DIR, PROMPT_LOG_DIR
@@ -39,6 +40,13 @@ def _summarize_runtime_text(text: str, limit: int = 160) -> str:
 
 class AllLLMRequestsFailedError(ValueError):
     """All LLM API retries are exhausted for a single agent request."""
+
+
+def _get_reply_focus_ids(chat_message: Optional[ChatMessage]) -> Tuple[Optional[str], Optional[str]]:
+    if chat_message is None:
+        return None, None
+    trigger_ext = PlatformMessageExt.model_validate(chat_message.ext_data)
+    return chat_message.message_id or None, trigger_ext.ref_msg_id or None
 
 
 async def run_agent(
@@ -132,6 +140,7 @@ async def run_agent(
 
     messages = [prompt_compiler.render_system_message()]
     messages.extend(prompt_compiler.render_practice_messages(adapter_dialog_examples, adapter_jinja_env))
+    focus_message_id, focus_reference_message_id = _get_reply_focus_ids(chat_message)
     messages.append(
         await prompt_compiler.render_history_message(
             chat_key=chat_key,
@@ -139,6 +148,8 @@ async def run_agent(
             one_time_code=one_time_code,
             config=config,
             model_group=used_model_group,
+            focus_message_id=focus_message_id,
+            focus_reference_message_id=focus_reference_message_id,
         ),
     )
 
@@ -239,7 +250,9 @@ async def run_agent(
                 msg = msg.extend(OpenAIChatMessage(**multimodal_agent_result))
             else:
                 raise ValueError(f"Multimodal agent result is not a list or string: {multimodal_agent_result}")
-            msg = msg.extend(OpenAIChatMessage.from_text("user", "Attention: the code AFTER THE AGENT METHOD is NOT EXECUTED!"))
+            msg = msg.extend(
+                OpenAIChatMessage.from_text("user", "Attention: the code AFTER THE AGENT METHOD is NOT EXECUTED!")
+            )
 
         # 异常类型的迭代对话
         exception_reason_map: Dict[ExecStopType, str] = {
@@ -324,14 +337,21 @@ async def run_agent(
                 config=config,
                 is_debug_iteration=True,
                 chat_key=chat_key,
-                on_llm_retry=lambda retry_index, retry_total, model_name, error_summary, iteration_index=i + 2: publish_runtime_state(
+                on_llm_retry=lambda retry_index,
+                retry_total,
+                model_name,
+                error_summary,
+                iteration_index=i + 2: publish_runtime_state(
                     phase="llm_retrying",
                     iteration_index=iteration_index,
                     llm_retry_index=retry_index,
                     model_name=model_name,
                     error_summary=error_summary,
                 ),
-                on_llm_attempt=lambda retry_index, _retry_total, model_name, iteration_index=i + 2: publish_runtime_state(
+                on_llm_attempt=lambda retry_index,
+                _retry_total,
+                model_name,
+                iteration_index=i + 2: publish_runtime_state(
                     phase="llm_generating",
                     iteration_index=iteration_index,
                     llm_retry_index=retry_index,
@@ -370,15 +390,15 @@ async def send_agent_request(
         log_path = f"{PROMPT_LOG_DIR}/chat_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
     else:
         log_path = None
-    err_log_path = (
-        f"{PROMPT_ERROR_LOG_DIR}/chat_err_{model_group.CHAT_MODEL}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
-    )
+    err_log_path = f"{PROMPT_ERROR_LOG_DIR}/chat_err_{model_group.CHAT_MODEL}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
 
     used_model_group: ModelConfigGroup = model_group  # 记录实际使用的模型组
     retry_errors: list[str] = []
 
     for i in range(config.AI_CHAT_LLM_API_MAX_RETRIES):
-        use_model_group: ModelConfigGroup = model_group if i < config.AI_CHAT_LLM_API_MAX_RETRIES - 1 else fallback_model_group
+        use_model_group: ModelConfigGroup = (
+            model_group if i < config.AI_CHAT_LLM_API_MAX_RETRIES - 1 else fallback_model_group
+        )
         retry_index = i + 1
         if on_llm_attempt is not None:
             await on_llm_attempt(retry_index, config.AI_CHAT_LLM_API_MAX_RETRIES, use_model_group.CHAT_MODEL)
@@ -413,7 +433,9 @@ async def send_agent_request(
                 f"LLM 请求失败: {e} ｜ 使用模型: {use_model_group.CHAT_MODEL} {'(fallback)' if i == config.AI_CHAT_LLM_API_MAX_RETRIES - 1 else ''}",
             )
             if on_llm_retry is not None:
-                await on_llm_retry(retry_index, config.AI_CHAT_LLM_API_MAX_RETRIES, use_model_group.CHAT_MODEL, error_summary)
+                await on_llm_retry(
+                    retry_index, config.AI_CHAT_LLM_API_MAX_RETRIES, use_model_group.CHAT_MODEL, error_summary
+                )
             # 避免重复添加，转换为Path对象并比较绝对路径
             err_log_path_obj = Path(err_log_path)
             if not any(str(log_path.absolute()) == str(err_log_path_obj.absolute()) for log_path in RECENT_ERR_LOGS):

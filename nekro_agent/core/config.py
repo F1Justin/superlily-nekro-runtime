@@ -1449,6 +1449,27 @@ class CoreConfig(ConfigBase):
             ),
         ).model_dump(),
     )
+    AI_VISION_REPLY_IMAGE_LIMIT: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        title="引用焦点视觉图片数量限制",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(
+                zh_CN="聊天配置",
+                en_US="Chat Configuration",
+            ),
+            i18n_title=i18n_text(
+                zh_CN="引用焦点视觉图片数量限制",
+                en_US="Reply Focus Vision Image Count Limit",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="被直接引用消息可优先传入视觉模型的图片数量，不占普通历史图片限额",
+                en_US="Images from the directly quoted message, reserved separately from ordinary history images",
+            ),
+        ).model_dump(),
+        description="被直接引用消息可优先传入视觉模型的图片数量，不占普通历史图片限额",
+    )
     AI_VISION_IMAGE_SIZE_LIMIT_KB: int = Field(
         default=1024,
         title="视觉图片大小限制 (KB)",

@@ -25,10 +25,16 @@ SuperLily runtime repository.
 - reduced built-in practice/history overhead while preserving reply targets;
 - strict normalization of the known Lily renderer pseudo-module import;
 - sandbox bookkeeping by container ID with fresh-client cleanup; and
-- non-recursive uploads root permission initialization.
+- non-recursive uploads root permission initialization;
+- exact trigger-to-quote binding through an adjacent Reply Focus block that is
+  outside the ordinary history count and character budgets; and
+- adapter-captured fallback snapshots for quoted messages missing from the
+  local history database.
 
 `AI_VISION_IMAGE_LIMIT` remains runtime configuration and is currently set to
-`1` in `/home/justin/nekro/configs/nekro-agent.yaml`.
+`1` in `/home/justin/nekro/configs/nekro-agent.yaml`. Directly quoted images
+have a separate `AI_VISION_REPLY_IMAGE_LIMIT`, currently `4`, so newer
+unrelated images cannot displace them.
 
 ## Verification and build
 
