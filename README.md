@@ -8,16 +8,14 @@ SuperLily 专用补丁和可复现的 Runtime release；莉莉的身份、世界
 产品路线、部署身份与验收由主仓库负责。
 
 > [!IMPORTANT]
-> 这是 SuperLily 的生产 downstream fork，不是 Nekro Agent 的通用替代发行版，也不承诺
-> 跟随 Nekro NXT。若要部署通用 Nekro Agent，请使用
+> 本仓库服务于 SuperLily 的生产认知运行时。通用 Nekro Agent 的部署入口与发行版本见
 > [`KroMiose/nekro-agent`](https://github.com/KroMiose/nekro-agent)。
 
 ## 生产身份与下游边界
 
-本仓库不在 README 中重复手写易漂移的 current version。当前生产 Runtime 的 tag、commit
-与镜像唯一以主仓库的
+当前生产 Runtime 的 tag、commit 与镜像由主仓库的
 [`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml)
-为准。Upstream fork point 固定为
+统一记录。Upstream fork point 固定为
 [`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3)。
 
 SuperLily 专用改动、可向 upstream 提炼的改动、同步策略、branch/tag 规则与许可证关系见
@@ -32,14 +30,12 @@ SuperLily 专用改动、可向 upstream 提炼的改动、同步策略、branch
 - Runtime 源码、upstream、tag、commit 与镜像锁：
   [`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml)
 
-> [!WARNING]
-> 下方保留的是 upstream Nekro Agent 的通用文档。其中 `kromiose/nekro-agent:latest`、
-> upstream 安装脚本和 Release 页面不会部署本仓库的 SuperLily 生产 fork。生产部署必须
-> 使用主仓库锁定并审阅的 Runtime tag、commit 和镜像身份。
+> [!NOTE]
+> 下方保留 upstream Nekro Agent 的通用文档。SuperLily 生产部署使用主仓库锁定并审阅的
+> Runtime tag、commit 和镜像身份。
 
-SuperLily 会持续从 Pi、Codex、DSH 和其他优秀 Agent Harness 中研究设计经验，但这些
-工程不是本仓库计划接入的 backend。当前路线是在这个 Nekro fork 内逐步改善真实执行
-反馈、可逆认知工作空间和自然 Agent loop。
+当前路线是在这个 Nekro fork 内逐步改善真实执行反馈、可逆认知工作空间和自然
+Agent loop。
 
 ## Upstream Nekro Agent 文档
 

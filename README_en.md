@@ -10,16 +10,13 @@ product roadmap, deployment identity, and acceptance evidence remain owned by
 the parent repository.
 
 > [!IMPORTANT]
-> This is SuperLily's production downstream fork. It is not a general Nekro
-> Agent replacement distribution and does not promise to track Nekro NXT. For
-> general Nekro Agent deployment, use
+> This repository serves SuperLily's production cognitive runtime. General
+> Nekro Agent releases and deployment entry points are available from
 > [`KroMiose/nekro-agent`](https://github.com/KroMiose/nekro-agent).
 
 ## Production identity and downstream boundary
 
-This README intentionally does not duplicate a drift-prone current version.
-The sole source of truth for the production Runtime tag, commit, and image is
-the parent repository's
+The parent repository records the production Runtime tag, commit, and image in
 [`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml).
 The upstream fork point is
 [`KroMiose/nekro-agent@v2.3.3`](https://github.com/KroMiose/nekro-agent/tree/v2.3.3).
@@ -37,17 +34,13 @@ and license relationship.
 - Runtime source, upstream, tag, commit, and image lock:
   [`deploy/nekro-runtime.lock.yml`](https://github.com/F1Justin/superlily/blob/master/deploy/nekro-runtime.lock.yml)
 
-> [!WARNING]
-> The upstream Nekro Agent documentation is preserved below. Its
-> `kromiose/nekro-agent:latest` image, installation scripts, and release pages
-> do not deploy this SuperLily production fork. Production deployments must use
-> the reviewed Runtime tag, commit, and image identity pinned by the parent
-> repository.
+> [!NOTE]
+> The upstream Nekro Agent documentation is preserved below. SuperLily
+> production deployments use the reviewed Runtime tag, commit, and image
+> identity pinned by the parent repository.
 
-SuperLily studies design lessons from Pi, Codex, DSH, and other strong Agent
-Harnesses, but those projects are not planned backends for this repository. The
-current direction is to evolve real execution feedback, a reversible cognitive
-workspace, and a natural Agent loop inside this Nekro fork.
+The current direction is to evolve real execution feedback, a reversible
+cognitive workspace, and a natural Agent loop inside this Nekro fork.
 
 ## Upstream Nekro Agent documentation
 
