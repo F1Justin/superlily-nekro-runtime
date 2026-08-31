@@ -628,11 +628,12 @@ def _select_history_images(
     ordinary_start = len(selected)
     if reply_focus:
         append_unique(_message_images(reply_focus.trigger_message), "current_request", recent_limit)
-    for message in reversed(recent_messages):
-        remaining_recent_slots = max(0, recent_limit - (len(selected) - ordinary_start))
-        if not remaining_recent_slots:
-            break
-        append_unique(_message_images(message), "recent_history", remaining_recent_slots)
+    else:
+        for message in reversed(recent_messages):
+            remaining_recent_slots = max(0, recent_limit - (len(selected) - ordinary_start))
+            if not remaining_recent_slots:
+                break
+            append_unique(_message_images(message), "recent_history", remaining_recent_slots)
     return selected
 
 

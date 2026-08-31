@@ -29,6 +29,10 @@
   - 注意: 同样具有防重复发送机制，通过文件内容的 MD5 判断。
 
 ### OneBot v11 专属工具
+- **send_msg_reply**:
+  - 描述: 明确需要可点击引用时，回复当前会话中的指定消息。
+  - 参数: `message_id` 必须是当前会话中真实存在的平台消息 ID。
+
 - **get_user_avatar**:
   - 描述: 获取 QQ 用户的头像。
   - 参数: `user_qq` (用户 QQ 号)。
@@ -55,6 +59,7 @@ from nekro_agent.api.plugin import (
 )
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.api.signal import MsgSignal
+from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.services.message_service import message_service
 from nekro_agent.tools.common_util import (
     calculate_file_md5,
@@ -208,33 +213,16 @@ async def on_user_message(_ctx: AgentCtx, message: ChatMessage):
     """用户任意消息回调"""
 
 
-@plugin.mount_prompt_inject_method(name="basic_prompt_inject")
-async def basic_prompt_inject(_ctx: AgentCtx):
-    """示例提示注入"""
-    features: Dict[str, bool] = {
-        "Reference_Message": False,
-    }
-    base_prompt = "Current Adapter Support Feature:\n"
-    if _ctx.adapter_key in ["onebot_v11"]:
-        features["Reference_Message"] = True
-    tips: str = "When you reference a message, user can click it to jump to the referenced message."
-    return base_prompt + "\n".join([f"{k}: {v}" for k, v in features.items()]) + "\n" + tips
-
-
 SEND_MSG_CACHE: Dict[str, List[str]] = {}
 SEND_FILE_CACHE: Dict[str, List[str]] = {}  # 文件 MD5 缓存，格式: {chat_key: [md5_1, md5_2, md5_3]}
 
 
-@plugin.mount_sandbox_method(
-    SandboxMethodType.TOOL,
-    name="发送聊天消息文本",
-    description="发送聊天消息文本，附带缓存消息重复检查",
-)
-async def send_msg_text(_ctx: AgentCtx, chat_key: str, message_text: str, ref_msg_id: Optional[str] = None):
-    """`send_msg_text(chat_key, message_text, ref_msg_id: str = None)` sends text to a chat.
-
-    Use `ref_msg_id` only when an actual reply or reference is needed.
-    """
+async def _send_msg_text(
+    _ctx: AgentCtx,
+    chat_key: str,
+    message_text: str,
+    ref_msg_id: Optional[str] = None,
+) -> None:
     global SEND_MSG_CACHE
 
     if _ctx.adapter_key not in plugin.support_adapter:
@@ -302,11 +290,41 @@ async def send_msg_text(_ctx: AgentCtx, chat_key: str, message_text: str, ref_ms
 
 @plugin.mount_sandbox_method(
     SandboxMethodType.TOOL,
+    name="发送聊天消息文本",
+    description="发送聊天消息文本，附带缓存消息重复检查",
+)
+async def send_msg_text(_ctx: AgentCtx, chat_key: str, message_text: str) -> None:
+    """`send_msg_text(chat_key, message_text)` sends text to a chat."""
+    await _send_msg_text(_ctx, chat_key, message_text)
+
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.TOOL,
+    name="引用并回复指定聊天消息",
+    description="明确需要可点击引用时，回复当前会话中真实存在的指定消息",
+)
+async def send_msg_reply(_ctx: AgentCtx, chat_key: str, message_id: str, message_text: str) -> None:
+    """`send_msg_reply(chat_key, message_id, message_text)` visibly quotes one existing message in the current chat.
+
+    Use this only when the user explicitly requests a visible, clickable quote. Normal answers use `send_msg_text`.
+    """
+    if _ctx.adapter_key != "onebot_v11":
+        raise Exception(f"Error: Message replies are unavailable in adapter {_ctx.adapter_key}.")
+
+    normalized_message_id = str(message_id)
+    if not await DBChatMessage.filter(chat_key=chat_key, message_id=normalized_message_id).exists():
+        raise Exception("Error: message_id does not identify a message in the current chat.")
+
+    await _send_msg_text(_ctx, chat_key, message_text, ref_msg_id=normalized_message_id)
+
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.TOOL,
     name="发送聊天消息图片/文件资源",
     description="发送聊天消息图片/文件资源，附带缓存文件重复检查",
 )
-async def send_msg_file(_ctx: AgentCtx, chat_key: str, file_path: str, ref_msg_id: Optional[str] = None):
-    """`send_msg_file(chat_key, file_path, ref_msg_id: str = None)` sends an existing image or file from the sandbox or a supported URL."""
+async def send_msg_file(_ctx: AgentCtx, chat_key: str, file_path: str) -> None:
+    """`send_msg_file(chat_key, file_path)` sends an existing image or file from the sandbox or a supported URL."""
     global SEND_FILE_CACHE
     file_container_path = file_path  # 防止误导llm
     if not isinstance(file_container_path, str):
@@ -352,9 +370,9 @@ async def send_msg_file(_ctx: AgentCtx, chat_key: str, file_path: str, ref_msg_i
             is_image = mime_type.startswith("image/")
 
         if is_image:
-            await _ctx.ms.send_image(chat_key, file_container_path, _ctx, ref_msg_id=ref_msg_id)
+            await _ctx.ms.send_image(chat_key, file_container_path, _ctx)
         else:
-            await _ctx.ms.send_file(chat_key, file_container_path, _ctx, ref_msg_id=ref_msg_id)
+            await _ctx.ms.send_file(chat_key, file_container_path, _ctx)
 
         # 更新文件缓存
         SEND_FILE_CACHE[chat_key].append(file_md5)
@@ -465,8 +483,8 @@ async def collect_available_methods(_ctx: AgentCtx) -> List[Callable]:
     elif _ctx.adapter_key == "wxwork_corp_app":
         methods = [send_msg_text, send_msg_file]
     elif _ctx.adapter_key == "onebot_v11":
-        # 仅 OneBot 提供头像工具
-        methods = [send_msg_text, send_msg_file, get_user_avatar]
+        # 仅 OneBot 提供可点击引用和头像工具
+        methods = [send_msg_text, send_msg_file, send_msg_reply, get_user_avatar]
     else:
         # 其他（包含 telegram、discord、wechatpad 等）
         methods = [send_msg_text, send_msg_file]

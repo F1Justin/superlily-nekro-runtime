@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import stat
 from pathlib import Path
@@ -27,6 +28,8 @@ from nekro_agent.services.agent.templates.history import (
 )
 from nekro_agent.services.agent.templates.system import RuntimeContractPrompt, SystemPrompt
 from nekro_agent.services.sandbox import runner
+from plugins.builtin.basic import plugin as basic_plugin
+from plugins.builtin.basic import send_msg_file, send_msg_reply, send_msg_text
 
 
 def _chat_message(
@@ -202,7 +205,7 @@ def test_missing_reply_uses_snapshot_or_explicit_unavailable_marker() -> None:
 
 def test_quoted_images_have_a_separate_priority_budget() -> None:
     quoted = _chat_message(1, "quoted", 1, images=("q1.png", "q2.png", "q3.png", "q4.png", "q5.png"))
-    trigger = _chat_message(20, "trigger", 20, ext_data={"ref_msg_id": "quoted"})
+    trigger = _chat_message(20, "trigger", 20, images=("current.png",), ext_data={"ref_msg_id": "quoted"})
     newer_unrelated = _chat_message(21, "newer", 21, images=("new.png",))
 
     selected = _select_history_images(
@@ -217,8 +220,67 @@ def test_quoted_images_have_a_separate_priority_budget() -> None:
         ("q2.png", "reply_focus"),
         ("q3.png", "reply_focus"),
         ("q4.png", "reply_focus"),
-        ("new.png", "recent_history"),
+        ("current.png", "current_request"),
     ]
+
+
+def test_reply_focus_does_not_attach_unrelated_history_image() -> None:
+    quoted = _chat_message(1, "quoted", 1, text="quoted text")
+    trigger = _chat_message(20, "trigger", 20, text="is this right", ext_data={"ref_msg_id": "quoted"})
+    unrelated = _chat_message(19, "unrelated", 19, images=("cats.png",))
+
+    selected = _select_history_images(
+        reply_focus=ReplyFocus(trigger, quoted, "quoted"),
+        recent_messages=[unrelated],
+        reply_limit=4,
+        recent_limit=1,
+    )
+
+    assert selected == []
+
+
+def test_ordinary_history_still_attaches_recent_image() -> None:
+    recent = _chat_message(19, "recent", 19, images=("recent.png",))
+
+    selected = _select_history_images(
+        reply_focus=None,
+        recent_messages=[recent],
+        reply_limit=4,
+        recent_limit=1,
+    )
+
+    assert [(image.file_name, source) for image, source in selected] == [("recent.png", "recent_history")]
+
+
+def test_default_send_methods_do_not_expose_reply_id() -> None:
+    assert list(inspect.signature(send_msg_text).parameters) == ["_ctx", "chat_key", "message_text"]
+    assert list(inspect.signature(send_msg_file).parameters) == ["_ctx", "chat_key", "file_path"]
+    assert basic_plugin.prompt_inject_method is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_reply_requires_message_from_current_chat() -> None:
+    query = SimpleNamespace(exists=AsyncMock(return_value=False))
+    ctx = SimpleNamespace(adapter_key="onebot_v11")
+
+    with patch("plugins.builtin.basic.DBChatMessage.filter", return_value=query):
+        with pytest.raises(Exception, match="does not identify a message in the current chat"):
+            await send_msg_reply(ctx, "group_1", "missing", "reply")
+
+
+@pytest.mark.asyncio
+async def test_explicit_reply_forwards_validated_message_id() -> None:
+    query = SimpleNamespace(exists=AsyncMock(return_value=True))
+    ctx = SimpleNamespace(adapter_key="onebot_v11")
+
+    with (
+        patch("plugins.builtin.basic.DBChatMessage.filter", return_value=query) as db_filter,
+        patch("plugins.builtin.basic._send_msg_text", new_callable=AsyncMock) as send,
+    ):
+        await send_msg_reply(ctx, "group_1", "message-42", "reply")
+
+    db_filter.assert_called_once_with(chat_key="group_1", message_id="message-42")
+    send.assert_awaited_once_with(ctx, "group_1", "reply", ref_msg_id="message-42")
 
 
 @pytest.mark.asyncio
