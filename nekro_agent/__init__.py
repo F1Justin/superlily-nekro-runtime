@@ -81,6 +81,9 @@ if _driver is not None:
     @_driver.on_startup
     async def on_startup():
         mark_started()
+        from nekro_agent.services.sandbox.runner import initialize_sandbox_runtime
+
+        await initialize_sandbox_runtime()
 
         # 启动时不再挂载主路由，它们已在启动前挂载完毕
         app = get_app()
@@ -175,6 +178,9 @@ if _driver is not None:
     async def on_shutdown():
         shutdown_started_at = time.perf_counter()
         mark_shutting_down()
+        from nekro_agent.services.sandbox.runner import shutdown_sandbox_runtime
+
+        await shutdown_sandbox_runtime()
         logger.debug("[shutdown] begin")
 
         step_started_at = time.perf_counter()

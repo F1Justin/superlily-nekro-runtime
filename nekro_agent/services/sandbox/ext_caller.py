@@ -1,10 +1,8 @@
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from nekro_agent.core import config
-from nekro_agent.core.os_env import OsEnv
 from nekro_agent.schemas.agent_ctx import AgentCtx
-from nekro_agent.services.plugin.collector import plugin_collector
 
 CODE_PREAMBLE = """
 from api_caller import *
@@ -19,18 +17,31 @@ def {method_name}(*args, **kwargs):
 """  #! 沙盒环境下不需要使用异步方式调用，因为实际执行是通过 RPC 调用的
 
 
-async def get_api_caller_code(container_key: str, from_chat_key: str, ctx: Optional[AgentCtx] = None):
+async def get_api_caller_code(
+    container_key: str,
+    from_chat_key: str,
+    ctx: Optional[AgentCtx] = None,
+    *,
+    rpc_token: str,
+    methods: dict[str, Callable[..., Any]],
+    socket_path: str = "",
+):
+    directory = Path(__file__).parent
     base_code = (
-        Path("nekro_agent/services/sandbox/ext_caller_code.py")
+        (directory / "ext_caller_code.py")
         .read_text(encoding="utf-8")
-        .replace("{CHAT_API}", config.SANDBOX_CHAT_API_URL)
-        .replace("{CONTAINER_KEY}", container_key)
-        .replace("{FROM_CHAT_KEY}", from_chat_key)
-        .replace("{RPC_SECRET_KEY}", OsEnv.RPC_SECRET_KEY)
+        .replace('"{CHAT_API}"', repr(config.SANDBOX_CHAT_API_URL))
+        .replace('"{CONTAINER_KEY}"', repr(container_key))
+        .replace('"{FROM_CHAT_KEY}"', repr(from_chat_key))
+        .replace('"{RPC_TOKEN}"', repr(rpc_token))
+        .replace('"{RPC_SOCKET}"', repr(socket_path))
     )
-    methods = await plugin_collector.get_all_sandbox_methods(ctx)
+    base_code = (directory / "rpc_wire.py").read_text(encoding="utf-8") + "\n" + base_code
+    base_code = base_code.replace(
+        "from nekro_agent.services.sandbox.rpc_wire import RPC_MAX_BYTES, decode_rpc_value, encode_rpc_value\n", "",
+    )
 
-    for method in methods:
-        if method.func.__name__ != "dynamic_importer":
-            base_code += METHOD_REG_TEMPLATE.format(method_name=method.func.__name__)
+    for name in methods:
+        if name != "dynamic_importer":
+            base_code += METHOD_REG_TEMPLATE.format(method_name=name)
     return base_code.strip()

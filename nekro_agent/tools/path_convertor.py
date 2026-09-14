@@ -92,6 +92,13 @@ def convert_to_host_path(
     if not sandbox_path.is_absolute():
         sandbox_path = base_path / sandbox_path
 
+    if ".." in sandbox_path.parts:
+        raise ValueError("Sandbox path traversal is not allowed")
+    for key in (chat_key, container_key):
+        if key is not None and (not key or Path(key).name != key or key in (".", "..") or "\\" in key):
+            raise ValueError("Invalid sandbox identity path")
+    if not any(sandbox_path.is_relative_to(base_path / location.value) for location in PathLocation):
+        raise ValueError("Path must be rooted in /app/shared or /app/uploads")
     # 标准化路径
     clean_path = Path(*sandbox_path.parts)
 
@@ -113,11 +120,34 @@ def convert_to_host_path(
 
     # 根据位置类型构建宿主机路径
     if location == PathLocation.UPLOADS:
-        return uploads_dir / chat_key / relative_path
-    if location == PathLocation.SHARED:
+        root = uploads_dir / chat_key
+    elif location == PathLocation.SHARED:
         _validate_shared_path(container_key)
-        return shared_dir / str(container_key) / relative_path
-    raise ValueError(f"Invalid path location: {location}, make sure your path is valid shared path or upload path")
+        root = shared_dir / str(container_key)
+    else:
+        raise ValueError("Invalid sandbox path location")
+    current = root
+    if current.is_symlink():
+        raise ValueError("Sandbox root must not be a symlink")
+    for part in relative_path.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Sandbox symlinks cannot be mapped to host paths")
+    return current
+
+
+def snapshot_sandbox_file(sandbox_path: Path, chat_key: str, container_key: str) -> Path:
+    from nekro_agent.tools.sandbox_files import snapshot_file
+
+    host_path = convert_to_host_path(sandbox_path, chat_key, container_key)
+    # Only the new task-owned workspaces have a trusted, lifecycle-managed export area.
+    if not (container_key.startswith("r2_") and len(container_key) == 35 and all(c in "0123456789abcdef" for c in container_key[3:])):
+        raise ValueError("File export requires a task-owned workspace")
+    absolute = sandbox_path if sandbox_path.is_absolute() else Path("/app") / sandbox_path
+    root = Path(USER_UPLOAD_DIR) / chat_key if absolute.is_relative_to("/app/uploads") else Path(SANDBOX_SHARED_HOST_DIR) / container_key
+    relative = host_path.relative_to(root)
+    destination = Path(SANDBOX_SHARED_HOST_DIR) / ".r2-state" / container_key[3:] / "exports"
+    return snapshot_file(root, relative, destination)
 
 
 def is_url_path(path: str) -> bool:

@@ -28,6 +28,7 @@ from nekro_agent.tools.common_util import download_file
 from nekro_agent.tools.path_convertor import (
     convert_to_host_path,
     is_url_path,
+    snapshot_sandbox_file,
 )
 
 logger = get_sub_logger("message_pipeline")
@@ -204,11 +205,12 @@ class UniversalChatService:
                 processed_file_path = file_path
                 agent_message.content = str(file_path)
             else:
-                host_path = convert_to_host_path(
-                    Path(content),
-                    chat_key=chat_key,
-                    container_key=ctx.container_key if ctx else None,
-                )
+                if ctx and ctx.container_key and ctx.container_key.startswith("r2_"):
+                    host_path = snapshot_sandbox_file(Path(content), chat_key, ctx.container_key)
+                else:
+                    host_path = convert_to_host_path(
+                        Path(content), chat_key=chat_key, container_key=ctx.container_key if ctx else None,
+                    )
 
                 if host_path and host_path.exists():
                     processed_file_path = str(host_path)

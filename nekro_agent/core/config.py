@@ -1691,6 +1691,19 @@ class CoreConfig(ConfigBase):
     )
 
     """沙盒配置"""
+    SANDBOX_OFFLINE_MODE: bool = Field(
+        default=False,
+        title="离线沙盒隔离",
+        description="禁用沙盒网络，使用任务专属 Unix RPC；不允许动态联网安装依赖。需先完成离线兼容性验收。",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="沙盒配置", en_US="Sandbox Configuration"),
+            i18n_title=i18n_text(zh_CN="离线沙盒隔离", en_US="Offline Sandbox Isolation"),
+            i18n_description=i18n_text(
+                zh_CN="禁用沙盒网络，使用任务专属 Unix RPC；不允许动态联网安装依赖。需先完成离线兼容性验收。",
+                en_US="Disable sandbox networking and use task-local Unix RPC. Requires offline compatibility validation.",
+            ),
+        ).model_dump(),
+    )
     SANDBOX_IMAGE_NAME: str = Field(
         default="kromiose/nekro-agent-sandbox",
         title="沙盒镜像名称",

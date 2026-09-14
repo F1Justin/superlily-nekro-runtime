@@ -15,6 +15,7 @@ from .path_convertor import (
     convert_filepath_to_sandbox_upload_path,
     convert_to_host_path,
     get_upload_file_path,
+    snapshot_sandbox_file,
 )
 
 
@@ -125,12 +126,9 @@ class FileSystem:
         Returns:
             Path: 文件对象
         """
-        path = Path(file_path)
-        if path.is_relative_to(Path("/app/shared")):
-            return self.shared_path / path.relative_to(Path("/app/shared"))
-        if path.is_relative_to(Path("/app/uploads")):
-            return self.upload_path / path.relative_to(Path("/app/uploads"))
-        raise ValueError(f'文件 "{path}" 不在合法的沙盒内容共享目录或上传目录下，无法映射到应用路径')
+        if self.container_key.startswith("r2_"):
+            return snapshot_sandbox_file(Path(file_path), self.chat_key, self.container_key)
+        return convert_to_host_path(Path(file_path), self.chat_key, self.container_key)
 
     def forward_file(self, file_path: Path | str) -> str:
         """通过文件路径向 AI 提供一个可访问的沙盒内互通文件路径

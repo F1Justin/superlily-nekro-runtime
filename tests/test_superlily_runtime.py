@@ -13,6 +13,7 @@ from nekro_agent.adapters.interface.schemas.platform import PlatformSendRequest
 from nekro_agent.core.os_env import _ensure_upload_dir
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_exec_code import ExecStopType
+from nekro_agent.schemas.agent_ctx import AgentCtx
 from nekro_agent.schemas.chat_message import ChatMessage, ChatMessageSegmentImage
 from nekro_agent.services.agent.creator import OpenAIChatMessage
 from nekro_agent.services.agent.openai import _create_http_client
@@ -28,6 +29,7 @@ from nekro_agent.services.agent.templates.history import (
 )
 from nekro_agent.services.agent.templates.system import RuntimeContractPrompt, SystemPrompt
 from nekro_agent.services.sandbox import runner
+from nekro_agent.services.sandbox.rpc_grants import rpc_grants
 from plugins.builtin.basic import plugin as basic_plugin
 from plugins.builtin.basic import send_msg_file, send_msg_reply, send_msg_text
 
@@ -343,6 +345,7 @@ class FakeDocker:
     def __init__(self) -> None:
         self.closed = False
         self.containers = FakeContainers(self)
+        self.images = SimpleNamespace(inspect=AsyncMock(return_value={"Id": "sha256:test"}))
 
     async def close(self) -> None:
         self.closed = True
@@ -360,7 +363,6 @@ async def test_sandbox_container_state_never_reuses_a_closed_client(tmp_path: Pa
     chat_key = "runtime-verification"
     upload_path = tmp_path / "uploads"
     (upload_path / chat_key).mkdir(parents=True)
-    runner.chat_key_sandbox_map.clear()
     runner.chat_key_sandbox_container_map.clear()
     runner.chat_key_sandbox_cleanup_task_map.clear()
     FakeDocker.deletes.clear()
@@ -382,43 +384,45 @@ async def test_sandbox_container_state_never_reuses_a_closed_client(tmp_path: Pa
     async def create_record(**kwargs: object) -> None:
         del kwargs
 
+    async def prepare_rpc(ctx, chat_key, container_key):
+        return rpc_grants.issue(AgentCtx(from_chat_key=chat_key, container_key=container_key), {}, 120)
+
     code_run_data = SimpleNamespace(code_content="pass", thought_chain="")
     patches = (
         patch.object(runner.aiodocker, "Docker", FakeDocker),
         patch.object(runner, "HOST_SHARED_DIR", tmp_path / "shared"),
-        patch.object(runner, "HOST_PACKAGE_DIR", tmp_path / "packages"),
-        patch.object(runner, "HOST_PIP_CACHE_DIR", tmp_path / "pip-cache"),
         patch.object(runner, "USER_UPLOAD_DIR", upload_path),
         patch.object(runner, "get_api_caller_code", AsyncMock(return_value="")),
+        patch.object(runner, "prepare_rpc", prepare_rpc),
         patch.object(runner.DBExecCode, "create", create_record),
     )
     for active_patch in patches:
         active_patch.start()
     try:
-        runner.chat_key_sandbox_container_map[chat_key] = "stale-container"
         with patch.object(runner, "run_container_with_timeout", successful_run):
             for _ in range(2):
                 result = await runner.run_code_in_sandbox(code_run_data, chat_key, 1000)
                 assert result == ("ok", "ok", ExecStopType.NORMAL.value)
-                assert chat_key not in runner.chat_key_sandbox_container_map
+                assert not runner.chat_key_sandbox_container_map
 
-        assert ("stale-container", False, True) in FakeDocker.deletes
+        assert FakeDocker.deletes
         assert not any(client_closed for _, client_closed, _ in FakeDocker.deletes)
 
         with patch.object(runner, "run_container_with_timeout", timed_out_run):
             result = await runner.run_code_in_sandbox(code_run_data, chat_key, 1000)
             assert result == ("timeout", "timeout", ExecStopType.TIMEOUT.value)
-            assert chat_key not in runner.chat_key_sandbox_container_map
+            assert not runner.chat_key_sandbox_container_map
 
         with (
             patch.object(runner, "run_container_with_timeout", failed_run),
             pytest.raises(RuntimeError, match="execution failed"),
         ):
             await runner.run_code_in_sandbox(code_run_data, chat_key, 1000)
-        assert chat_key not in runner.chat_key_sandbox_container_map
+        assert not runner.chat_key_sandbox_container_map
         assert FakeDocker.deletes[-1][1:] == (False, True)
     finally:
-        await _cancel_cleanup(chat_key)
+        for key in list(runner.chat_key_sandbox_cleanup_task_map):
+            await _cancel_cleanup(key)
         for active_patch in reversed(patches):
             active_patch.stop()
 

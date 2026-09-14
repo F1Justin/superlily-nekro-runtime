@@ -53,6 +53,7 @@ async def run_agent(
 ):
     # 获取当前聊天频道的有效配置
     one_time_code = os.urandom(4).hex()
+    sandbox_task_id = os.urandom(16).hex()
     db_chat_channel: DBChatChannel
     logger.debug(f"[run_agent] {chat_key} | 开始准备上下文")
     if ctx:
@@ -201,6 +202,7 @@ async def run_agent(
                 llm_response=llm_response,
                 ctx=ctx,
                 llm_retry_errors=llm_retry_errors,
+                task_id=sandbox_task_id,
             )
             stop_type = ExecStopType(stop_type_value)
 

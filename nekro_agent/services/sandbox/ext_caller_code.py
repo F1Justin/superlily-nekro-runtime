@@ -1,7 +1,9 @@
 """沙盒环境下的扩展方法调用代理"""
 
+import http.client
 import importlib
-import pickle as _pickle
+import json
+import socket
 import subprocess
 import sys
 import urllib.parse
@@ -14,6 +16,8 @@ import requests as _requests
 from packaging.specifiers import SpecifierSet
 from packaging.version import parse
 
+from nekro_agent.services.sandbox.rpc_wire import RPC_MAX_BYTES, decode_rpc_value, encode_rpc_value
+
 # 设置中文字体
 plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans", "Arial Unicode MS", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
@@ -21,7 +25,15 @@ plt.rcParams["axes.unicode_minus"] = False
 CHAT_API = "{CHAT_API}"
 CONTAINER_KEY = "{CONTAINER_KEY}"
 FROM_CHAT_KEY = "{FROM_CHAT_KEY}"
-RPC_SECRET_KEY = "{RPC_SECRET_KEY}"
+RPC_TOKEN = "{RPC_TOKEN}"
+RPC_SOCKET = "{RPC_SOCKET}"
+
+
+class _UnixRPCConnection(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(RPC_SOCKET)
 
 
 def __extension_method_proxy(method: Callable):
@@ -31,34 +43,42 @@ def __extension_method_proxy(method: Callable):
         """Agent 执行沙盒扩展方法时实际调用的方法"""
 
         body = {"method": method.__name__, "args": args, "kwargs": kwargs}
-        data: bytes = _pickle.dumps(body)
-        response = _requests.post(
-            f"{CHAT_API}/ext/rpc_exec?container_key={CONTAINER_KEY}&from_chat_key={FROM_CHAT_KEY}",
-            data=data,
-            headers={
-                "Content-Type": "application/octet-stream",
-                "X-RPC-Token": RPC_SECRET_KEY,
-            },
-        )
-        if response.status_code == 200:
-            if response.headers.get("Run-Error") and response.headers["Run-Error"].lower() == "true":
+        data = encode_rpc_value(body)
+        headers = {"Content-Type": "application/json", "X-RPC-Token": RPC_TOKEN}
+        if RPC_SOCKET:
+            connection = _UnixRPCConnection("localhost", timeout=125)
+            try:
+                connection.request("POST", "/ext/rpc_exec", body=data, headers=headers)
+                response = connection.getresponse()
+                status = response.status
+                payload = response.read(RPC_MAX_BYTES + 1)
+            finally:
+                connection.close()
+        else:
+            with _requests.post(f"{CHAT_API}/ext/rpc_exec", data=data, headers=headers, timeout=125, stream=True) as response:
+                status = response.status_code
+                payload = response.raw.read(RPC_MAX_BYTES + 1)
+        if status == 200:
+            reply = decode_rpc_value(payload)
+            if reply["error"]:
                 print(
-                    f"The method `{method.__name__}` returned an error:\n{response.text}",
+                    f"The method `{method.__name__}` returned an error:\n{reply['error']}",
                 )
                 exit(1)
-            ret_data = _pickle.loads(response.content)
-            if response.headers.get("Method-Type") == "agent":
+            ret_data = reply["result"]
+            if reply["method_type"] == "agent":
                 print(
                     f"The agent method `{method.__name__}` returned:\n{ret_data}\n[result end]\nPlease continue to generate an appropriate response based on the above information.",
                 )
                 exit(8)
-            if response.headers.get("Method-Type") == "multimodal_agent":
+            if reply["method_type"] == "multimodal_agent":
+                ret_data = f"<AGENT_RESULT>{json.dumps(ret_data, ensure_ascii=False)}</AGENT_RESULT>"
                 print(
                     f"The multimodal agent method `{method.__name__}` returned:\n{ret_data}\n[result end]",
                 )
                 exit(11)
             return ret_data
-        raise Exception(f"Plugin RPC method `{method.__name__}` call failed: {response.status_code}")
+        raise RuntimeError(f"Plugin RPC method `{method.__name__}` call failed: {status}")
 
     return acutely_call_method
 

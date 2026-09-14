@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
+import fcntl
+import hashlib
+import json
 import os
-import shutil
 import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -11,22 +13,20 @@ from aiodocker.docker import DockerContainer
 
 from nekro_agent.core.config import config
 from nekro_agent.core.logger import get_sub_logger
-from nekro_agent.core.os_env import (
-    SANDBOX_PACKAGE_DIR,
-    SANDBOX_PIP_CACHE_DIR,
-    SANDBOX_SHARED_HOST_DIR,
-    USER_UPLOAD_DIR,
-    OsEnv,
-)
+from nekro_agent.core.os_env import SANDBOX_SHARED_HOST_DIR, USER_UPLOAD_DIR
 from nekro_agent.models.db_exec_code import DBExecCode, ExecStopType
 from nekro_agent.schemas.agent_ctx import AgentCtx
 from nekro_agent.schemas.chat_message import ChatMessage
 from nekro_agent.schemas.sandbox import SandboxCodeExtData
 from nekro_agent.services.agent.openai import OpenAIResponse
 from nekro_agent.services.agent.resolver import ParsedCodeRunData
+from nekro_agent.services.plugin.collector import plugin_collector
 from nekro_agent.tools.common_util import limited_text_output
 
 from .ext_caller import CODE_PREAMBLE, get_api_caller_code
+from .rpc_broker import RPCBroker
+from .rpc_grants import RPCGrant, rpc_grants
+from .workspace import Workspace, WorkspaceStore
 
 # 主机共享目录
 
@@ -36,60 +36,82 @@ HOST_SHARED_DIR = (
 )
 # 用户上传目录
 USER_UPLOAD_DIR = Path(USER_UPLOAD_DIR) if USER_UPLOAD_DIR.startswith("/") else Path(USER_UPLOAD_DIR).resolve()
-# 主机pip缓存目录
-HOST_PIP_CACHE_DIR = (
-    Path(SANDBOX_PIP_CACHE_DIR) if SANDBOX_PIP_CACHE_DIR.startswith("/") else Path(SANDBOX_PIP_CACHE_DIR).resolve()
-)
-# 主机包目录
-HOST_PACKAGE_DIR = Path(SANDBOX_PACKAGE_DIR) if SANDBOX_PACKAGE_DIR.startswith("/") else Path(SANDBOX_PACKAGE_DIR).resolve()
-
 IMAGE_NAME = config.SANDBOX_IMAGE_NAME  # Docker 镜像名称
 CONTAINER_SHARE_DIR = "/app/shared"  # 容器内共享目录 (读写)
 CONTAINER_UPLOAD_DIR = "/app/uploads"  # 容器上传目录 (只读)
-CONTAINER_WORK_DIR = "/app"  # 容器工作目录
 CONTAINER_PIP_CACHE_DIR = "/app/.pip_cache"  # 容器pip缓存目录
 CONTAINER_PACKAGE_DIR = "/app/packages"  # 容器包缓存目录
 
-CODE_FILENAME = "run_script.py.code"  # 要执行的代码文件名
 RUN_CODE_FILENAME = "run_script.py"  # 要执行的代码文件名
 
-API_CALLER_FILENAME = "api_caller.py.code"  # 外部 API 调用器文件名
 RUN_API_CALLER_FILENAME = "api_caller.py"  # 外部 API 调用器文件名
 
-# 代码运行结束标记
-CODE_RUN_END_FLAGS = {
-    ExecStopType.NORMAL: "[SANDBOX_RUN_ENDS_WITH_NORMAL]",  # 正常结束 (exit code 0)
-    ExecStopType.ERROR: "[SANDBOX_RUN_ENDS_WITH_ERROR]",  # 错误停止 (exit code 非0)
-    ExecStopType.TIMEOUT: "[SANDBOX_RUN_ENDS_WITH_TIMEOUT]",  # 超时停止
-    ExecStopType.AGENT: "[SANDBOX_RUN_ENDS_WITH_AGENT]",  # 代理停止 (exit code 8)
-    ExecStopType.MANUAL: "[SANDBOX_RUN_ENDS_WITH_MANUAL]",  # 手动停止 (exit code 9)
-    ExecStopType.MULTIMODAL_AGENT: "[SANDBOX_RUN_ENDS_WITH_MULTIMODAL_AGENT]",  # 多模态代理停止 (exit code 11)
-}
+EXEC_SCRIPT = "exec python -B /app/control/run_script.py"
+MAX_WORKSPACE_BYTES = 64 * 1024 * 1024
+MAX_OUTPUT_BYTES = 256 * 1024
+_workspace_stores: dict[Path, WorkspaceStore] = {}
+_runtime_lock = None
+_cleanup_loop: Optional[asyncio.Task] = None
 
-EXEC_SCRIPT = f"""
-rm -f {CONTAINER_WORK_DIR}/{RUN_CODE_FILENAME} &&
-cp {CONTAINER_SHARE_DIR}/{CODE_FILENAME} {CONTAINER_WORK_DIR}/{RUN_CODE_FILENAME} &&
-cp {CONTAINER_SHARE_DIR}/{API_CALLER_FILENAME} {CONTAINER_WORK_DIR}/{RUN_API_CALLER_FILENAME} &&
-export MPLCONFIGDIR=/app/tmp/matplotlib &&
-python {RUN_CODE_FILENAME}
-exit_code=$?
-if [ $exit_code -eq 0 ]; then
-    echo "{CODE_RUN_END_FLAGS[ExecStopType.NORMAL]}"
-elif [ $exit_code -eq 8 ]; then
-    echo "{CODE_RUN_END_FLAGS[ExecStopType.AGENT]}"
-elif [ $exit_code -eq 9 ]; then
-    echo "{CODE_RUN_END_FLAGS[ExecStopType.MANUAL]}"
-elif [ $exit_code -eq 11 ]; then
-    echo "{CODE_RUN_END_FLAGS[ExecStopType.MULTIMODAL_AGENT]}"
-else
-    echo "{CODE_RUN_END_FLAGS[ExecStopType.ERROR]}"
-fi
-"""
 
-# 频道沙盒活跃时间记录表
-chat_key_sandbox_map: Dict[str, float] = {}
+def workspace_store() -> WorkspaceStore:
+    root = HOST_SHARED_DIR.resolve()
+    if root not in _workspace_stores:
+        _workspace_stores[root] = WorkspaceStore(root)
+    return _workspace_stores[root]
 
-# 频道沙盒容器记录表。容器对象不能活得比创建它的 Docker client 更久。
+
+async def prepare_rpc(ctx: Optional[AgentCtx], chat_key: str, container_key: str) -> tuple[str, RPCGrant]:
+    trusted_ctx = ctx.model_copy(update={"container_key": container_key}) if ctx else await AgentCtx.create_by_chat_key(chat_key, container_key)
+    if trusted_ctx.chat_key != chat_key:
+        raise PermissionError("Execution context does not match the conversation")
+    available = await plugin_collector.get_all_sandbox_methods(trusted_ctx)
+    methods = {item.func.__name__: item.func for item in available}
+    if len(methods) != len(available):
+        raise ValueError("Ambiguous sandbox method names")
+    return rpc_grants.issue(trusted_ctx, methods, config.SANDBOX_RUNNING_TIMEOUT + 30)
+
+
+def container_config(image: str, control: Path, shared: Path, uploads: Path, offline: bool) -> dict:
+    host_config = {
+        "Binds": [
+            f"{control / 'code'}:/app/control:ro",
+            f"{control / 'diagnostics'}:/app/diagnostics:ro",
+            f"{control / 'packages'}:{CONTAINER_PACKAGE_DIR}:rw",
+            f"{control / 'pip-cache'}:{CONTAINER_PIP_CACHE_DIR}:rw",
+            f"{shared}:{CONTAINER_SHARE_DIR}:rw",
+            f"{uploads}:{CONTAINER_UPLOAD_DIR}:ro",
+        ],
+        "Memory": 512 * 1024 * 1024,
+        "MemorySwap": 512 * 1024 * 1024,
+        "NanoCPUs": 1000000000,
+        "PidsLimit": 128,
+        "ReadonlyRootfs": True,
+        "CapDrop": ["ALL"],
+        "SecurityOpt": ["no-new-privileges"],
+        "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=64m,mode=1777"},
+        "Ulimits": [{"Name": "fsize", "Soft": MAX_WORKSPACE_BYTES, "Hard": MAX_WORKSPACE_BYTES}],
+        "LogConfig": {"Type": "json-file", "Config": {"max-size": "1m", "max-file": "1"}},
+        "NetworkMode": "none" if offline else "bridge",
+    }
+    if offline:
+        host_config["Binds"].append(f"{control / 'broker'}:/app/broker:ro")
+    else:
+        host_config["ExtraHosts"] = ["host.docker.internal:host-gateway"]
+    return {
+        "Image": image,
+        "Cmd": ["bash", "-c", EXEC_SCRIPT],
+        "HostConfig": host_config,
+        "User": "65534:65534",
+        "WorkingDir": CONTAINER_SHARE_DIR,
+        "Env": ["MPLCONFIGDIR=/tmp/matplotlib", "TMPDIR=/tmp", "PYTHONDONTWRITEBYTECODE=1", "OPENBLAS_NUM_THREADS=1"],
+        "Labels": {
+            "superlily.r2.sandbox": "true",
+            "superlily.r2.owner": hashlib.sha256(str(HOST_SHARED_DIR.resolve()).encode()).hexdigest(),
+        },
+    }
+
+# 以任务 container_key 记录 ID；容器对象不能活得比 Docker client 更久。
 chat_key_sandbox_container_map: Dict[str, str] = {}
 
 # 频道清理任务记录表
@@ -107,6 +129,7 @@ async def limited_run_code(
     chat_message: Optional[ChatMessage] = None,
     ctx: Optional[AgentCtx] = None,
     llm_retry_errors: Optional[list[str]] = None,
+    task_id: Optional[str] = None,
 ) -> Tuple[str, str, int]:
     """限制并发运行代码
 
@@ -132,6 +155,7 @@ async def limited_run_code(
             chat_message=chat_message,
             ctx=ctx,
             llm_retry_errors=llm_retry_errors,
+            task_id=task_id,
         )
 
 
@@ -143,6 +167,7 @@ async def run_code_in_sandbox(
     chat_message: Optional[ChatMessage] = None,
     ctx: Optional[AgentCtx] = None,
     llm_retry_errors: Optional[list[str]] = None,
+    task_id: Optional[str] = None,
 ) -> Tuple[str, str, int]:
     """在沙盒容器中运行代码并获取输出"""
 
@@ -151,46 +176,13 @@ async def run_code_in_sandbox(
 
     generation_time_ms = llm_response.generation_time_ms if llm_response else 0
 
-    # container_key = f'{time.strftime("%Y%m%d%H%M%S")}_{os.urandom(4).hex()}'
-    container_key = f"sandbox_{from_chat_key}"
+    store = workspace_store()
+    store.cleanup()
+    workspace = store.acquire(task_id or os.urandom(16).hex(), from_chat_key)
+    container_key = workspace.container_key
     container_name = f"nekro-agent-sandbox-{container_key}-{os.urandom(4).hex()}"
-
-    host_shared_dir = Path(HOST_SHARED_DIR / container_key)
-    host_shared_dir.mkdir(parents=True, exist_ok=True)
-
-    HOST_PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
-    HOST_PIP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 写入预置依赖代码
-    api_caller_file_path = Path(host_shared_dir) / API_CALLER_FILENAME
-    api_caller_file_path.write_text(
-        await get_api_caller_code(container_key=container_key, from_chat_key=from_chat_key, ctx=ctx),
-        encoding="utf-8",
-    )
-
-    # 写入要执行的代码
-    code_file_path = Path(host_shared_dir) / CODE_FILENAME
-    code_file_path.write_text(f"{CODE_PREAMBLE.strip()}\n\n{code_run_data.code_content}", encoding="utf-8")
-
-    # 设置目录权限
-    try:
-        Path.chmod(host_shared_dir, 0o777)
-        logger.debug(f"设置目录权限: {host_shared_dir} 777")
-        Path.chmod(HOST_PIP_CACHE_DIR, 0o777)
-        logger.debug(f"设置目录权限: {HOST_PIP_CACHE_DIR} 777")
-        Path.chmod(HOST_PACKAGE_DIR, 0o777)
-        logger.debug(f"设置目录权限: {HOST_PACKAGE_DIR} 777")
-    except Exception as e:
-        logger.error(f"设置目录权限失败: {e}")
-
-    # 清理过期任务
-    if from_chat_key in chat_key_sandbox_cleanup_task_map:
-        try:
-            chat_key_sandbox_cleanup_task_map[from_chat_key].cancel()
-            logger.debug(f"清理过期任务: {from_chat_key}")
-        except Exception as e:
-            logger.error(f"清理过期任务失败: {e}")
-        del chat_key_sandbox_cleanup_task_map[from_chat_key]
+    host_shared_dir = store.shared_dir(workspace.task_id)
+    control = store.control_dir(workspace.task_id)
 
     # 启动容器
     # 使用 try/finally 确保 Docker 客户端（及其底层 aiohttp UnixConnector）在使用后被正确关闭，
@@ -199,64 +191,76 @@ async def run_code_in_sandbox(
     container: Optional[DockerContainer] = None
     container_id: Optional[str] = None
     execution_returned = False
+    token = ""
+    grant: Optional[RPCGrant] = None
+    broker: Optional[RPCBroker] = None
+    usage_task: Optional[asyncio.Task] = None
     try:
-        stale_container_id = chat_key_sandbox_container_map.pop(from_chat_key, None)
-        if stale_container_id:
-            try:
-                await docker.containers.container(stale_container_id).delete(force=True)
-                logger.debug(f"清理过期沙盒: {from_chat_key} | {stale_container_id}")
-            except Exception as e:
-                if "404" in str(e):
-                    logger.debug(f"沙盒容器已不存在: {from_chat_key} | {stale_container_id}")
-                else:
-                    logger.error(f"清理过期沙盒失败: {e}")
-
+        token, grant = await prepare_rpc(ctx, from_chat_key, container_key)
+        grant.remaining_calls = min(grant.remaining_calls, workspace.remaining_calls)
+        code_dir = control / "code"
+        code_dir.mkdir(exist_ok=True)
+        (control / "diagnostics").mkdir(exist_ok=True)
+        (code_dir / RUN_API_CALLER_FILENAME).write_text(
+            await get_api_caller_code(
+                container_key, from_chat_key, ctx, rpc_token=token, methods=grant.methods,
+                socket_path="/app/broker/rpc.sock" if config.SANDBOX_OFFLINE_MODE else "",
+            ), encoding="utf-8",
+        )
+        (code_dir / RUN_CODE_FILENAME).write_text(f"{CODE_PREAMBLE.strip()}\n\n{code_run_data.code_content}", encoding="utf-8")
+        if config.SANDBOX_OFFLINE_MODE:
+            broker = RPCBroker(control / "broker" / "rpc.sock", token, grant)
+            await broker.start()
+        upload_path = (USER_UPLOAD_DIR / from_chat_key).resolve()
+        if not upload_path.is_relative_to(USER_UPLOAD_DIR.resolve()) or upload_path == USER_UPLOAD_DIR.resolve():
+            raise ValueError("Invalid upload conversation root")
+        upload_path.mkdir(parents=True, exist_ok=True)
+        image = await docker.images.inspect(IMAGE_NAME)
         container = await docker.containers.run(
             name=container_name,
-            config={
-                "Image": IMAGE_NAME,
-                "Cmd": ["bash", "-c", EXEC_SCRIPT],
-                "HostConfig": {
-                    "Binds": [
-                        f"{HOST_PIP_CACHE_DIR}:{CONTAINER_PIP_CACHE_DIR}:rw",
-                        f"{HOST_PACKAGE_DIR}:{CONTAINER_PACKAGE_DIR}:rw",
-                        f"{host_shared_dir}:{CONTAINER_SHARE_DIR}:rw",
-                        f"{USER_UPLOAD_DIR}/{from_chat_key}:{CONTAINER_UPLOAD_DIR}:ro",
-                    ],
-                    "Memory": 512 * 1024 * 1024,  # 内存限制 (512MB)
-                    "NanoCPUs": 1000000000,  # CPU 限制 (1 core)
-                    "SecurityOpt": (
-                        []
-                        if OsEnv.RUN_IN_DOCKER
-                        else [
-                            # "no-new-privileges",  # 禁止提升权限
-                            "apparmor=unconfined",  # 禁止 AppArmor 配置
-                        ]
-                    ),
-                    "NetworkMode": "bridge",
-                    "ExtraHosts": ["host.docker.internal:host-gateway"],
-                },
-                "User": "nobody",  # 非特权用户
-                "AutoRemove": True,
-            },
+            config=container_config(image["Id"], control, host_shared_dir, upload_path, config.SANDBOX_OFFLINE_MODE),
         )
         container_id = container.id
-        chat_key_sandbox_container_map[from_chat_key] = container_id
+        chat_key_sandbox_container_map[container_key] = container_id
         logger.debug(f"启动容器: {container_name} | ID: {container_id}")
+        usage_task = asyncio.create_task(_watch_workspace(store, workspace, container, grant))
 
         # 获取输出和退出类型
         output_text, stop_type = await run_container_with_timeout(
             container,
             config.SANDBOX_RUNNING_TIMEOUT,
         )
+        if usage_task.done() and usage_task.exception() is not None:
+            output_text = f"{output_text}\nWorkspace budget exceeded."
+            stop_type = ExecStopType.ERROR
+        if stop_type in (ExecStopType.AGENT, ExecStopType.MULTIMODAL_AGENT):
+            expected = "agent" if stop_type == ExecStopType.AGENT else "multimodal_agent"
+            if grant.continuation != expected:
+                stop_type = ExecStopType.ERROR
+                output_text = "Untrusted continuation exit without a successful Agent RPC."
+            elif expected == "multimodal_agent":
+                output_text = f"<AGENT_RESULT>{json.dumps(grant.continuation_result, ensure_ascii=False)}</AGENT_RESULT>"
+            else:
+                output_text = str(grant.continuation_result)
         execution_returned = True
     finally:
-        if container_id and chat_key_sandbox_container_map.get(from_chat_key) == container_id:
-            chat_key_sandbox_container_map.pop(from_chat_key, None)
+        rpc_grants.revoke(token)
+        if usage_task is not None:
+            usage_task.cancel()
+            await asyncio.gather(usage_task, return_exceptions=True)
+        if container_id and chat_key_sandbox_container_map.get(container_key) == container_id:
+            chat_key_sandbox_container_map.pop(container_key, None)
         if container_id and not execution_returned:
             with contextlib.suppress(Exception):
                 await docker.containers.container(container_id).delete(force=True)
         await docker.close()
+        if broker is not None:
+            await broker.close()
+        (control / "code" / RUN_API_CALLER_FILENAME).unlink(missing_ok=True)
+        if grant is not None:
+            workspace.remaining_calls = grant.remaining_calls
+        store.release(workspace)
+        _schedule_workspace_cleanup(store, workspace)
 
     # 记录执行耗时
     exec_time = int((time.time() - start_time) * 1000)  # 转换为毫秒
@@ -265,21 +269,10 @@ async def run_code_in_sandbox(
 
     logger.debug(f"容器 {container_name} 输出: {limited_text_output(output_text)} | 退出类型: {stop_type}")
 
-    # 沙盒共享目录超过 30 分钟未活动，则自动清理
-    async def cleanup_container_shared_dir(box_last_active_time):
-        nonlocal from_chat_key
-        await asyncio.sleep(30 * 60)
-        if box_last_active_time == chat_key_sandbox_map.get(from_chat_key):
-            try:
-                shutil.rmtree(host_shared_dir)
-            except Exception as e:
-                logger.error(f"清理容器共享目录时发生错误: {e}")
-
-    box_last_active_time = time.time()
-    chat_key_sandbox_map[from_chat_key] = box_last_active_time
-    chat_key_sandbox_cleanup_task_map[from_chat_key] = asyncio.create_task(
-        cleanup_container_shared_dir(box_last_active_time),
-    )
+    output_name = f"execution-{workspace.epoch}.txt"
+    (control / "diagnostics" / output_name).write_text(output_text, encoding="utf-8")
+    for old_output in sorted((control / "diagnostics").glob("execution-*.txt"), key=lambda path: path.stat().st_mtime)[:-8]:
+        old_output.unlink()
 
     final_output = (
         output_text
@@ -290,6 +283,8 @@ async def run_code_in_sandbox(
             placeholder=f"...(output too long, hidden {len(output_text) - output_limit} characters)...",
         )
     )
+    if len(output_text) > output_limit:
+        final_output += f"\nFull bounded output: /app/diagnostics/{output_name} (read within this task)."
 
     await DBExecCode.create(
         chat_key=from_chat_key,
@@ -317,37 +312,72 @@ async def run_code_in_sandbox(
 
 async def run_container_with_timeout(container: DockerContainer, timeout: int) -> Tuple[str, ExecStopType]:
     """运行容器并返回输出结果和退出类型"""
+    chunks: list[str] = []
+    byte_count = 0
+    output_exceeded = False
+
+    async def collect_output() -> None:
+        nonlocal byte_count, output_exceeded
+        async for chunk in container.log(stdout=True, stderr=True, follow=True):
+            encoded = chunk.encode("utf-8")
+            remaining = MAX_OUTPUT_BYTES - byte_count
+            chunks.append(encoded[:remaining].decode("utf-8", errors="replace"))
+            byte_count += len(encoded)
+            if byte_count > MAX_OUTPUT_BYTES:
+                output_exceeded = True
+                await container.kill()
+                return
+
+    log_task = asyncio.create_task(collect_output())
     try:
-        task = asyncio.create_task(asyncio.wait_for(container.wait(), timeout=timeout))
-        await asyncio.wait_for(task, timeout=timeout)
-        outputs = await container.log(stdout=True, stderr=True)
-        await container.delete()
-        logger.info(f"容器 {container.id} 运行结束退出")
-
-        # 检查输出中的结束标记来确定退出类型
-        output_text = "".join(outputs).strip()
-        stop_type = ExecStopType.ERROR  # 默认为错误退出
-
-        # 移除所有结束标记并确定退出类型
-        for _type, end_flag in CODE_RUN_END_FLAGS.items():
-            if end_flag in output_text:
-                stop_type = _type
-                output_text = output_text.replace(end_flag, "").strip()
-                break
-
+        status = await asyncio.wait_for(container.wait(), timeout=timeout)
+        await asyncio.wait_for(log_task, timeout=5)
+        exit_code = status["StatusCode"]
+        stop_type = {
+            0: ExecStopType.NORMAL, 8: ExecStopType.AGENT, 9: ExecStopType.MANUAL,
+            11: ExecStopType.MULTIMODAL_AGENT,
+        }.get(exit_code, ExecStopType.ERROR)
+        if output_exceeded:
+            chunks.append("\nOutput budget exceeded; execution stopped.")
+            stop_type = ExecStopType.ERROR
     except asyncio.TimeoutError:
-        logger.warning(f"容器 {container.id} 运行超过 {timeout} 秒，强制停止容器")
-        outputs = await container.log(stdout=True, stderr=True)
-        outputs.append(f"# This container has been killed because it exceeded the {timeout} seconds limit.")
-        await container.kill()
-        await container.delete()
-        output_text = "".join(outputs).strip()
-        # 移除所有可能的结束标记
-        for end_flag in CODE_RUN_END_FLAGS.values():
-            output_text = output_text.replace(end_flag, "").strip()
-        return output_text, ExecStopType.TIMEOUT
-    else:
-        return output_text, stop_type
+        with contextlib.suppress(Exception):
+            await container.kill()
+        chunks.append(f"\nExecution exceeded {timeout} seconds; stopped.")
+        stop_type = ExecStopType.TIMEOUT
+    finally:
+        log_task.cancel()
+        await asyncio.gather(log_task, return_exceptions=True)
+        await container.delete(force=True)
+    return "".join(chunks).strip(), stop_type
+
+
+async def _watch_workspace(store: WorkspaceStore, workspace: Workspace, container: DockerContainer, grant: RPCGrant) -> None:
+    while True:
+        await asyncio.sleep(0.25)
+        try:
+            await asyncio.to_thread(store.check_usage, workspace.task_id, MAX_WORKSPACE_BYTES)
+        except (ValueError, OSError):
+            grant.revoked = True
+            await container.kill()
+            raise
+
+
+def _schedule_workspace_cleanup(store: WorkspaceStore, workspace: Workspace) -> None:
+    key = workspace.container_key
+    previous = chat_key_sandbox_cleanup_task_map.pop(key, None)
+    if previous is not None:
+        previous.cancel()
+
+    async def cleanup() -> None:
+        try:
+            await asyncio.sleep(store.ttl + 1)
+            store.cleanup()
+        finally:
+            if chat_key_sandbox_cleanup_task_map.get(key) is asyncio.current_task():
+                chat_key_sandbox_cleanup_task_map.pop(key, None)
+
+    chat_key_sandbox_cleanup_task_map[key] = asyncio.create_task(cleanup())
 
 
 async def cleanup_sandbox_containers():
@@ -357,9 +387,57 @@ async def cleanup_sandbox_containers():
         containers = await docker.containers.list(all=True)
         for container in containers:
             container_info = await container.show()
-            if IMAGE_NAME in container_info["Name"]:
-                await container.kill()
-                await container.delete()
+            labels = container_info.get("Config", {}).get("Labels", {})
+            owner = hashlib.sha256(str(HOST_SHARED_DIR.resolve()).encode()).hexdigest()
+            if labels.get("superlily.r2.sandbox") == "true" and labels.get("superlily.r2.owner") == owner:
+                await container.delete(force=True)
                 logger.info(f"已清理容器 {container_info['Name']}")
     finally:
         await docker.close()
+
+
+async def initialize_sandbox_runtime() -> None:
+    global _runtime_lock, _cleanup_loop
+    if _runtime_lock is not None:
+        return
+    state = HOST_SHARED_DIR / ".r2-state"
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = (state / "runtime.lock").open("a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        await cleanup_sandbox_containers()
+        store = workspace_store()
+        store.cleanup()
+    except BaseException:
+        lock.close()
+        raise
+    _runtime_lock = lock
+
+    async def sweep() -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                store.cleanup()
+            except OSError as exc:
+                logger.error(f"Workspace cleanup failed: {exc}")
+
+    _cleanup_loop = asyncio.create_task(sweep())
+
+
+async def shutdown_sandbox_runtime() -> None:
+    global _runtime_lock, _cleanup_loop
+    rpc_grants.revoke_all()
+    tasks = list(chat_key_sandbox_cleanup_task_map.values())
+    if _cleanup_loop is not None:
+        tasks.append(_cleanup_loop)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    chat_key_sandbox_cleanup_task_map.clear()
+    _cleanup_loop = None
+    try:
+        await cleanup_sandbox_containers()
+    finally:
+        if _runtime_lock is not None:
+            _runtime_lock.close()
+            _runtime_lock = None
