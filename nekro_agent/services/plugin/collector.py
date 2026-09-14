@@ -199,8 +199,7 @@ class PluginCollector:
             logger.warning(f"插件 {plugin.name} 是内置插件，跳过卸载")
             return
 
-        if plugin.cleanup_method:
-            await plugin.cleanup_method()
+        if await plugin.cleanup():
             logger.info(f"插件 {plugin.name} 清理完成")
 
         # 卸载插件命令
@@ -267,8 +266,7 @@ class PluginCollector:
                 from nekro_agent.services.command.registry import command_registry
 
                 command_registry.unregister_plugin_commands(loaded_plugin.key)
-            if loaded_plugin.cleanup_method:
-                await loaded_plugin.cleanup_method()
+            if await loaded_plugin.cleanup():
                 logger.info(f"插件 {loaded_plugin.name} 清理完成")
             if loaded_plugin.key in self.loaded_plugins:
                 del self.loaded_plugins[loaded_plugin.key]
@@ -484,8 +482,7 @@ class PluginCollector:
         if plugin.key in self.loaded_plugins:
             # 检查重复插件
             loaded_plugin = self.loaded_plugins[plugin.key]
-            if loaded_plugin.cleanup_method:
-                await loaded_plugin.cleanup_method()
+            if await loaded_plugin.cleanup():
                 logger.info(f"插件 {loaded_plugin.name} 清理完成")
             if loaded_plugin.module_name in self.loaded_module_names:
                 self.loaded_module_names.remove(loaded_plugin.module_name)
@@ -501,9 +498,10 @@ class PluginCollector:
 
         if isinstance(plugin, NekroPlugin):
             # 直接设置内置插件标识
+            plugin._is_enabled = plugin.key in config.PLUGIN_ENABLED  # noqa: SLF001
             try:
-                if plugin.init_method:
-                    await plugin.init_method()
+                if plugin.is_enabled:
+                    await plugin.initialize()
             except Exception as e:
                 error_msg = f'插件 "{plugin.name}" 初始化失败 {path}: {e}'
                 logger.exception(error_msg)
@@ -904,8 +902,7 @@ class PluginCollector:
         cleanup_count = 0
         for _plugin_key, plugin in self.loaded_plugins.items():
             try:
-                if plugin.cleanup_method:
-                    await plugin.cleanup_method()
+                if await plugin.cleanup():
                     cleanup_count += 1
             except Exception as e:
                 logger.exception(f"清理插件 {plugin.name} 时发生错误: {e}")

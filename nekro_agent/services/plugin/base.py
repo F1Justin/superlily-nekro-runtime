@@ -106,6 +106,8 @@ class NekroPlugin:
         self.allow_sleep = allow_sleep
         self.sleep_brief = sleep_brief.strip()
         self._is_enabled = True
+        self._initialized = False
+        self._initialization_lock = asyncio.Lock()
         self._key = f"{self.author}.{self.module_name}"
 
         # 插件子 logger：用于前端按插件过滤日志
@@ -755,6 +757,33 @@ class NekroPlugin:
     def is_enabled(self) -> bool:
         return self._is_enabled
 
+    async def initialize(self) -> None:
+        """首次启用时初始化；失败不得使插件进入可用状态。"""
+        async with self._initialization_lock:
+            if self._initialized:
+                return
+            try:
+                if self.init_method:
+                    await self.init_method()
+            except (Exception, asyncio.CancelledError):
+                if self.cleanup_method:
+                    try:
+                        await self.cleanup_method()
+                    except Exception:
+                        self.logger.exception(f"插件 {self.name} 初始化失败后的清理失败")
+                raise
+            self._initialized = True
+
+    async def cleanup(self) -> bool:
+        """只清理已初始化的插件，避免禁用插件在关机时重新访问外部依赖。"""
+        async with self._initialization_lock:
+            if not self._initialized:
+                return False
+            if self.cleanup_method:
+                await self.cleanup_method()
+            self._initialized = False
+            return True
+
     async def enable(self) -> None:
         """启用插件并触发相应的回调函数
         
@@ -764,6 +793,9 @@ class NekroPlugin:
         if self._is_enabled:
             return  # 已经启用，无需重复操作
         
+        await self.initialize()
+        if self._is_enabled:
+            return
         self._is_enabled = True
         # 自动触发启用回调
         await self.trigger_callbacks("enabled")
