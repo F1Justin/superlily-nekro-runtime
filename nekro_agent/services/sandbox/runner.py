@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -27,6 +28,23 @@ from .ext_caller import CODE_PREAMBLE, get_api_caller_code
 from .rpc_broker import RPCBroker
 from .rpc_grants import RPCGrant, rpc_grants
 from .workspace import Workspace, WorkspaceStore
+
+_conversation_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+
+
+@contextlib.asynccontextmanager
+async def conversation_execution(chat_key: str) -> AsyncIterator[None]:
+    lock, users = _conversation_locks.get(chat_key, (asyncio.Lock(), 0))
+    _conversation_locks[chat_key] = (lock, users + 1)
+    try:
+        async with lock:
+            yield
+    finally:
+        _, users = _conversation_locks[chat_key]
+        if users == 1:
+            del _conversation_locks[chat_key]
+        else:
+            _conversation_locks[chat_key] = (lock, users - 1)
 
 # 主机共享目录
 
@@ -79,6 +97,7 @@ def container_config(image: str, control: Path, shared: Path, uploads: Path, off
             f"{control / 'diagnostics'}:/app/diagnostics:ro",
             f"{control / 'packages'}:{CONTAINER_PACKAGE_DIR}:rw",
             f"{control / 'pip-cache'}:{CONTAINER_PIP_CACHE_DIR}:rw",
+            f"{control / 'work'}:/app/task:rw",
             f"{shared}:{CONTAINER_SHARE_DIR}:rw",
             f"{uploads}:{CONTAINER_UPLOAD_DIR}:ro",
         ],
@@ -103,7 +122,7 @@ def container_config(image: str, control: Path, shared: Path, uploads: Path, off
         "Cmd": ["bash", "-c", EXEC_SCRIPT],
         "HostConfig": host_config,
         "User": "65534:65534",
-        "WorkingDir": CONTAINER_SHARE_DIR,
+        "WorkingDir": "/app",
         "Env": ["MPLCONFIGDIR=/tmp/matplotlib", "TMPDIR=/tmp", "PYTHONDONTWRITEBYTECODE=1", "OPENBLAS_NUM_THREADS=1"],
         "Labels": {
             "superlily.r2.sandbox": "true",
@@ -146,8 +165,8 @@ async def limited_run_code(
         Tuple[str, str, int]: 最终输出结果、原始输出结果和退出类型
     """
 
-    async with semaphore:
-        return await run_code_in_sandbox(
+    async with conversation_execution(from_chat_key), semaphore:
+        return await _run_code_in_sandbox(
             code_run_data=code_run_data,
             from_chat_key=from_chat_key,
             output_limit=output_limit,
@@ -160,6 +179,23 @@ async def limited_run_code(
 
 
 async def run_code_in_sandbox(
+    code_run_data: ParsedCodeRunData,
+    from_chat_key: str,
+    output_limit: int,
+    llm_response: Optional[OpenAIResponse] = None,
+    chat_message: Optional[ChatMessage] = None,
+    ctx: Optional[AgentCtx] = None,
+    llm_retry_errors: Optional[list[str]] = None,
+    task_id: Optional[str] = None,
+) -> Tuple[str, str, int]:
+    async with conversation_execution(from_chat_key):
+        return await _run_code_in_sandbox(
+            code_run_data, from_chat_key, output_limit, llm_response, chat_message,
+            ctx, llm_retry_errors, task_id,
+        )
+
+
+async def _run_code_in_sandbox(
     code_run_data: ParsedCodeRunData,
     from_chat_key: str,
     output_limit: int,
@@ -211,7 +247,10 @@ async def run_code_in_sandbox(
         if config.SANDBOX_OFFLINE_MODE:
             broker = RPCBroker(control / "broker" / "rpc.sock", token, grant)
             await broker.start()
-        upload_path = (USER_UPLOAD_DIR / from_chat_key).resolve()
+        upload_path = USER_UPLOAD_DIR / from_chat_key
+        if upload_path.is_symlink():
+            raise ValueError("Upload conversation root must not be a symlink")
+        upload_path = upload_path.resolve()
         if not upload_path.is_relative_to(USER_UPLOAD_DIR.resolve()) or upload_path == USER_UPLOAD_DIR.resolve():
             raise ValueError("Invalid upload conversation root")
         upload_path.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,7 @@ from nekro_agent.tools.common_util import (
     download_file_from_bytes,
     limited_text_output,
 )
+from nekro_agent.tools.sandbox_paths import shared_host_dir
 
 from .path_convertor import (
     convert_filepath_to_sandbox_shared_path,
@@ -62,7 +63,7 @@ class FileUtils:
             chat_key: 聊天频道ID
             container_key: 容器ID
         """
-        path = cls.to_absolute_path(SANDBOX_SHARED_HOST_DIR) / container_key
+        path = shared_host_dir(cls.to_absolute_path(SANDBOX_SHARED_HOST_DIR), container_key)
         path.mkdir(parents=True, exist_ok=True)
         return path
 

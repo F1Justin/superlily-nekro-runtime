@@ -19,7 +19,8 @@ If reasoning tags are required, use at most one concise `<think>...</think>` blo
 
 Python 3.11 with network access.
 
-- `./shared`: writable temporary workspace for generated files.
+- `./shared`: writable files shared by tasks in this conversation; retained after a task ends. Check existing files before overwriting.
+- `./task`: writable temporary files private to this task; retained across retries, cleaned after task expiry.
 - `./uploads`: read-only user and chat uploads.
 - Users cannot access sandbox paths. Saving a file is not delivery; call `send_msg_file(...)` to make it visible in chat.
 - Common libraries include numpy, scipy, pandas, matplotlib, opencv, scikit-learn, sympy, pymupdf, openpyxl, imageio, markdown, and rarfile.

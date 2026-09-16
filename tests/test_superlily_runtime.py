@@ -124,6 +124,8 @@ def test_runtime_contract_teaches_raw_python_without_language_fences() -> None:
     ).render(prompt_env)
 
     assert "Output only the script body" in prompt
+    assert "files shared by tasks in this conversation" in prompt
+    assert "temporary files private to this task" in prompt
     assert "Begin with a real Python statement" in prompt
     assert "```python\nsend_msg_text" not in prompt
     assert "```python\nagent_method" not in prompt

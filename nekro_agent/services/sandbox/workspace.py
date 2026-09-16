@@ -1,4 +1,4 @@
-"""Task-owned files and supervisor-owned manifests (single Runtime process)."""
+"""Persistent conversation files with disposable task state (single Runtime process)."""
 
 import json
 import os
@@ -7,6 +7,8 @@ import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from nekro_agent.tools.sandbox_paths import shared_host_dir, validate_storage_key
 
 TASK_PATTERN = re.compile(r"[0-9a-f]{32}")
 
@@ -42,7 +44,7 @@ class WorkspaceStore:
 
     def shared_dir(self, task_id: str) -> Path:
         self.control_dir(task_id)
-        return self.root / f"r2_{task_id}"
+        return shared_host_dir(self.root, f"r2_{task_id}")
 
     def _read(self, task_id: str) -> Workspace:
         return Workspace(**json.loads((self.control_dir(task_id) / "manifest.json").read_text()))
@@ -68,6 +70,7 @@ class WorkspaceStore:
                 self._write(workspace)
 
     def acquire(self, task_id: str, chat_key: str) -> Workspace:
+        validate_storage_key(chat_key)
         if task_id in self.retired:
             raise ValueError("Workspace expired; start a new task")
         if task_id in self.active:
@@ -93,11 +96,13 @@ class WorkspaceStore:
         shared.chmod(0o777)
         for name in ("work", "out"):
             target = shared / name
-            if workspace.epoch == 1:
+            if not target.exists() and not target.is_symlink():
                 target.mkdir()
                 target.chmod(0o777)
-        for name in ("packages", "pip-cache"):
+        for name in ("packages", "pip-cache", "work"):
             target = self.control_dir(task_id) / name
+            if target.is_symlink():
+                raise ValueError("Task directory must not be a symlink")
             target.mkdir(exist_ok=True)
             target.chmod(0o777)
         self.active.add(task_id)
@@ -121,18 +126,14 @@ class WorkspaceStore:
             workspace = self._read(task_id)
             if workspace.task_id != task_id or current - workspace.touched_at < self.ttl:
                 continue
-            shared = self.shared_dir(task_id)
-            if shared.is_symlink():
-                raise ValueError("Refusing to clean symlink workspace")
-            if shared.exists():
-                shutil.rmtree(shared)
+            # Conversation files survive task expiry; only supervisor-owned state expires.
             shutil.rmtree(directory)
             self.retired.add(task_id)
             removed.append(task_id)
         return removed
 
     def check_usage(self, task_id: str, max_bytes: int, max_entries: int = 10000) -> None:
-        roots = [self.shared_dir(task_id), self.control_dir(task_id) / "packages", self.control_dir(task_id) / "pip-cache"]
+        roots = [self.shared_dir(task_id), *(self.control_dir(task_id) / name for name in ("work", "packages", "pip-cache"))]
         size = 0
         count = 0
 

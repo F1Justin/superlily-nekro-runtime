@@ -6,6 +6,7 @@ from typing import Optional
 
 from nekro_agent.core.logger import logger
 from nekro_agent.core.os_env import SANDBOX_SHARED_HOST_DIR, USER_UPLOAD_DIR
+from nekro_agent.tools.sandbox_paths import shared_host_dir, task_state_dir
 
 
 class PathLocation(Enum):
@@ -13,6 +14,7 @@ class PathLocation(Enum):
 
     UPLOADS = "uploads"
     SHARED = "shared"
+    TASK = "task"
 
 
 def _detect_path_location(path: Path) -> Optional[PathLocation]:
@@ -33,6 +35,8 @@ def _detect_path_location(path: Path) -> Optional[PathLocation]:
                 return PathLocation.UPLOADS
             if part == PathLocation.SHARED.value:
                 return PathLocation.SHARED
+            if part == PathLocation.TASK.value:
+                return PathLocation.TASK
         else:
             return None
     except Exception as e:
@@ -98,7 +102,7 @@ def convert_to_host_path(
         if key is not None and (not key or Path(key).name != key or key in (".", "..") or "\\" in key):
             raise ValueError("Invalid sandbox identity path")
     if not any(sandbox_path.is_relative_to(base_path / location.value) for location in PathLocation):
-        raise ValueError("Path must be rooted in /app/shared or /app/uploads")
+        raise ValueError("Path must be rooted in /app/shared, /app/uploads or /app/task")
     # 标准化路径
     clean_path = Path(*sandbox_path.parts)
 
@@ -123,7 +127,9 @@ def convert_to_host_path(
         root = uploads_dir / chat_key
     elif location == PathLocation.SHARED:
         _validate_shared_path(container_key)
-        root = shared_dir / str(container_key)
+        root = shared_host_dir(shared_dir, str(container_key), chat_key)
+    elif location == PathLocation.TASK:
+        root = task_state_dir(shared_dir, str(container_key), chat_key) / "work"
     else:
         raise ValueError("Invalid sandbox path location")
     current = root
@@ -139,14 +145,17 @@ def convert_to_host_path(
 def snapshot_sandbox_file(sandbox_path: Path, chat_key: str, container_key: str) -> Path:
     from nekro_agent.tools.sandbox_files import snapshot_file
 
-    host_path = convert_to_host_path(sandbox_path, chat_key, container_key)
-    # Only the new task-owned workspaces have a trusted, lifecycle-managed export area.
-    if not (container_key.startswith("r2_") and len(container_key) == 35 and all(c in "0123456789abcdef" for c in container_key[3:])):
-        raise ValueError("File export requires a task-owned workspace")
+    host_path = convert_to_host_path(sandbox_path, chat_key, container_key, Path(USER_UPLOAD_DIR), Path(SANDBOX_SHARED_HOST_DIR))
+    state = task_state_dir(Path(SANDBOX_SHARED_HOST_DIR), container_key, chat_key)
     absolute = sandbox_path if sandbox_path.is_absolute() else Path("/app") / sandbox_path
-    root = Path(USER_UPLOAD_DIR) / chat_key if absolute.is_relative_to("/app/uploads") else Path(SANDBOX_SHARED_HOST_DIR) / container_key
+    if absolute.is_relative_to("/app/uploads"):
+        root = Path(USER_UPLOAD_DIR) / chat_key
+    elif absolute.is_relative_to("/app/task"):
+        root = state / "work"
+    else:
+        root = shared_host_dir(Path(SANDBOX_SHARED_HOST_DIR), container_key, chat_key)
     relative = host_path.relative_to(root)
-    destination = Path(SANDBOX_SHARED_HOST_DIR) / ".r2-state" / container_key[3:] / "exports"
+    destination = state / "exports"
     return snapshot_file(root, relative, destination)
 
 

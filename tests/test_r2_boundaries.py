@@ -25,6 +25,7 @@ from nekro_agent.services.sandbox.rpc_broker import RPCBroker
 from nekro_agent.services.sandbox.rpc_grants import RPCGrantRegistry, rpc_grants
 from nekro_agent.services.sandbox.rpc_wire import RPC_MAX_BYTES, decode_rpc_value, encode_rpc_value
 from nekro_agent.services.sandbox.workspace import WorkspaceStore
+from nekro_agent.tools import path_convertor
 from nekro_agent.tools.path_convertor import convert_to_host_path
 from nekro_agent.tools.sandbox_files import snapshot_file
 
@@ -186,11 +187,12 @@ async def test_http_rpc_rejects_global_token_identity_and_non_json(grant) -> Non
         assert response.status_code == 400
 
 
-def test_workspace_retries_are_private_and_manifest_is_not_model_writable(tmp_path: Path) -> None:
+def test_conversation_files_persist_and_task_state_is_private(tmp_path: Path) -> None:
     store = WorkspaceStore(tmp_path)
     first = store.acquire("1" * 32, "chat")
     root = store.shared_dir(first.task_id)
     (root / "result.txt").write_text("material")
+    (store.control_dir(first.task_id) / "work" / "scratch").write_text("temporary")
     with pytest.raises(ValueError):
         store.acquire(first.task_id, "chat")
     first.remaining_calls = 7
@@ -203,13 +205,19 @@ def test_workspace_retries_are_private_and_manifest_is_not_model_writable(tmp_pa
     with pytest.raises(PermissionError):
         store.acquire(first.task_id, "other-chat")
     second = store.acquire("2" * 32, "chat")
-    assert not (store.shared_dir(second.task_id) / "result.txt").exists()
+    assert store.shared_dir(second.task_id) == root
+    assert (store.shared_dir(second.task_id) / "result.txt").read_text() == "material"
+    assert not (store.control_dir(second.task_id) / "work" / "scratch").exists()
+    other = store.acquire("3" * 32, "other-chat")
+    assert not (store.shared_dir(other.task_id) / "result.txt").exists()
     assert not store.control_dir(first.task_id).is_relative_to(root)
 
 
 def test_workspace_recovery_cleanup_and_active_pins(tmp_path: Path) -> None:
     store = WorkspaceStore(tmp_path, ttl=1)
     first = store.acquire("1" * 32, "chat")
+    saved = store.shared_dir(first.task_id) / "saved.txt"
+    saved.write_text("keep across tasks and restarts")
     unrelated = tmp_path / "legacy-directory"
     unrelated.mkdir()
     assert not store.cleanup(now=time.time() + 100)
@@ -219,6 +227,10 @@ def test_workspace_recovery_cleanup_and_active_pins(tmp_path: Path) -> None:
         recovered.acquire(first.task_id, "chat")
     assert recovered.cleanup(now=time.time() + 100) == [first.task_id]
     assert unrelated.exists()
+    assert saved.read_text() == "keep across tasks and restarts"
+    assert not recovered.control_dir(first.task_id).exists()
+    replacement = recovered.acquire("2" * 32, "chat")
+    assert (recovered.shared_dir(replacement.task_id) / "saved.txt").read_text() == saved.read_text()
     with pytest.raises(ValueError):
         recovered.acquire(first.task_id, "chat")
 
@@ -229,6 +241,90 @@ def test_workspace_usage_is_bounded(tmp_path: Path) -> None:
     (store.shared_dir(workspace.task_id) / "large").write_bytes(b"x" * 100)
     with pytest.raises(ValueError):
         store.check_usage(workspace.task_id, 50)
+
+
+def test_existing_conversation_files_are_reused_without_migration(tmp_path: Path) -> None:
+    legacy = tmp_path / "sandbox_chat"
+    legacy.mkdir()
+    (legacy / "old.csv").write_text("existing")
+    store = WorkspaceStore(tmp_path)
+    workspace = store.acquire("1" * 32, "chat")
+    assert store.shared_dir(workspace.task_id) == legacy
+    store.release(workspace)
+    store.cleanup(now=time.time() + 3600)
+    assert (legacy / "old.csv").read_text() == "existing"
+
+
+@pytest.mark.parametrize("chat_key", ["../other", "/absolute", "other/chat", "..", ""])
+def test_workspace_rejects_invalid_conversation_identity(tmp_path: Path, chat_key: str) -> None:
+    with pytest.raises(ValueError):
+        WorkspaceStore(tmp_path).acquire("1" * 32, chat_key)
+
+
+def test_workspace_rejects_symlink_conversation_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "sandbox_chat").symlink_to(outside)
+    with pytest.raises(ValueError):
+        WorkspaceStore(tmp_path).acquire("1" * 32, "chat")
+
+
+async def test_waiting_conversation_does_not_take_global_execution_slot(monkeypatch) -> None:
+    monkeypatch.setattr(runner, "semaphore", asyncio.Semaphore(1))
+    execute = AsyncMock(return_value=("ok", "ok", 0))
+    monkeypatch.setattr(runner, "_run_code_in_sandbox", execute)
+    async with runner.conversation_execution("chat"):
+        blocked = asyncio.create_task(runner.limited_run_code(SimpleNamespace(), "chat"))
+        await asyncio.sleep(0)
+        assert not execute.called
+        result = await asyncio.wait_for(runner.limited_run_code(SimpleNamespace(), "other"), timeout=1)
+        assert result[0] == "ok"
+        assert execute.call_count == 1
+    await blocked
+    assert execute.call_count == 2
+    assert not runner._conversation_locks
+
+
+def test_conversation_and_task_exports_use_bound_identity(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(path_convertor, "SANDBOX_SHARED_HOST_DIR", str(tmp_path))
+    monkeypatch.setattr(path_convertor, "USER_UPLOAD_DIR", str(tmp_path / "uploads"))
+    store = WorkspaceStore(tmp_path)
+    workspace = store.acquire("1" * 32, "chat")
+    shared = store.shared_dir(workspace.task_id)
+    (shared / "result.txt").write_text("shared")
+    (store.control_dir(workspace.task_id) / "work" / "result.txt").write_text("task")
+    for location, expected in (("shared", "shared"), ("task", "task")):
+        exported = path_convertor.snapshot_sandbox_file(Path(f"/app/{location}/result.txt"), "chat", workspace.container_key)
+        assert exported.read_text() == expected
+        assert exported.parent == store.control_dir(workspace.task_id) / "exports"
+        with pytest.raises(PermissionError):
+            path_convertor.snapshot_sandbox_file(Path(f"/app/{location}/result.txt"), "other", workspace.container_key)
+    (shared / "link").symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError):
+        path_convertor.snapshot_sandbox_file(Path("/app/shared/link"), "chat", workspace.container_key)
+
+
+async def test_same_conversation_execution_serializes_and_cancelled_waiter_cleans_up() -> None:
+    entered = asyncio.Event()
+
+    async def waiting() -> None:
+        async with runner.conversation_execution("chat"):
+            entered.set()
+
+    async with runner.conversation_execution("chat"):
+        waiter = asyncio.create_task(waiting())
+        await asyncio.sleep(0)
+        assert not entered.is_set()
+        async with runner.conversation_execution("other-chat"):
+            assert not entered.is_set()
+        cancelled = asyncio.create_task(waiting())
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+    await waiter
+    assert entered.is_set()
+    assert not runner._conversation_locks
 
 
 @pytest.mark.parametrize("path", ["/app/shared/../../secret", "/other/shared/file", "/app/uploads/../secret"])
@@ -300,6 +396,8 @@ def test_container_profile_has_explicit_limits_and_only_task_mounts(tmp_path: Pa
     assert host["ReadonlyRootfs"] and host["CapDrop"] == ["ALL"]
     assert host["PidsLimit"] == 128
     assert host["MemorySwap"] == host["Memory"]
+    assert profile["WorkingDir"] == "/app"
+    assert f"{tmp_path / 'control' / 'work'}:/app/task:rw" in host["Binds"]
     assert all(".packages" not in bind and "docker.sock" not in bind for bind in host["Binds"])
 
 
@@ -358,6 +456,9 @@ import socket
 from pathlib import Path
 assert [name for _, name in socket.if_nameindex()] == ['lo']
 Path('/app/shared/work/result.txt').write_text('retained')
+Path('/app/task/scratch.txt').write_text('temporary')
+assert Path('shared/work/result.txt').read_text() == 'retained'
+assert Path('task/scratch.txt').read_text() == 'temporary'
 print(echo(_ck)['chat_key'])
 try:
     Path('/app/uploads/forbidden').write_text('no')
@@ -376,8 +477,19 @@ print('offline-ok')
         )
         assert second[2] == ExecStopType.NORMAL.value, second[0]
         assert "retained" in second[0] and "chat" in second[0]
+        third = await runner.run_code_in_sandbox(
+            SimpleNamespace(code_content="from pathlib import Path\nassert not Path('/app/task/scratch.txt').exists()\nprint(Path('/app/shared/work/result.txt').read_text())", thought_chain=""),
+            "chat", 1000, ctx=ctx, task_id="6" * 32,
+        )
+        assert third[2] == ExecStopType.NORMAL.value, third[0]
+        assert "retained" in third[0]
+        other = await runner.run_code_in_sandbox(
+            SimpleNamespace(code_content="from pathlib import Path\nassert not Path('/app/shared/work/result.txt').exists()\nprint('isolated')", thought_chain=""),
+            "other-chat", 1000, ctx=AgentCtx(from_chat_key="other-chat"), task_id="7" * 32,
+        )
+        assert other[2] == ExecStopType.NORMAL.value, other[0]
     finally:
         for key, task in list(runner.chat_key_sandbox_cleanup_task_map.items()):
-            if key == "r2_" + task_id:
+            if key in {"r2_" + value * 32 for value in ("3", "6", "7")}:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)

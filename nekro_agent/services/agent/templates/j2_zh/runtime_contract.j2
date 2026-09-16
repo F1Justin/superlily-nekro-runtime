@@ -19,7 +19,8 @@
 
 Python 3.11，可访问网络。
 
-- `./shared`：生成文件使用的可写临时工作区。
+- `./shared`：当前会话各任务共享的可写文件目录，任务结束后保留；覆盖前先检查已有文件。
+- `./task`：本任务独立的可写临时目录，重试时保留，任务过期后清理。
 - `./uploads`：只读的用户及聊天上传目录。
 - 用户无法访问沙盒路径。保存文件不等于交付；必须调用 `send_msg_file(...)` 才能让聊天中的用户看到。
 - 常用库包括 numpy、scipy、pandas、matplotlib、opencv、scikit-learn、sympy、pymupdf、openpyxl、imageio、markdown 和 rarfile。
