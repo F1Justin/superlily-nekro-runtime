@@ -13,6 +13,42 @@ from nekro_agent.tools.sandbox_paths import shared_host_dir, validate_storage_ke
 TASK_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
+@dataclass(frozen=True)
+class StorageBudget:
+    conversation_bytes: int = 256 * 1024 * 1024
+    task_bytes: int = 128 * 1024 * 1024
+    total_bytes: int = 2 * 1024 * 1024 * 1024
+    min_free_bytes: int = 2 * 1024 * 1024 * 1024
+
+
+def measure_usage(roots: list[Path], max_bytes: int, max_entries: int = 10000) -> tuple[int, int]:
+    size = 0
+    count = 0
+
+    def fail_on_error(error: OSError) -> None:
+        raise error
+
+    for root in roots:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for path, directories, files, directory_fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False, onerror=fail_on_error):
+                if path.count(os.sep) > 64:
+                    raise ValueError("Workspace nesting budget exceeded")
+                count += len(directories) + len(files)
+                for name in [*directories, *files]:
+                    try:
+                        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        # Count sparse logical size as well as allocated blocks/preallocation.
+                        size += max(info.st_size, info.st_blocks * 512)
+                    except FileNotFoundError:
+                        continue
+                if size > max_bytes or count > max_entries:
+                    raise ValueError(f"Workspace budget exceeded: {size}/{max_bytes} bytes, {count}/{max_entries} entries")
+        finally:
+            os.close(root_fd)
+    return size, count
+
+
 @dataclass
 class Workspace:
     task_id: str
@@ -134,25 +170,21 @@ class WorkspaceStore:
 
     def check_usage(self, task_id: str, max_bytes: int, max_entries: int = 10000) -> None:
         roots = [self.shared_dir(task_id), *(self.control_dir(task_id) / name for name in ("work", "packages", "pip-cache"))]
-        size = 0
-        count = 0
+        measure_usage(roots, max_bytes, max_entries)
 
-        def fail_on_error(error: OSError) -> None:
-            raise error
-
-        for root in roots:
-            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    def check_budget(self, task_id: str, budget: StorageBudget, *, total: bool = True) -> None:
+        for label, roots, limit in (
+            ("Conversation", [self.shared_dir(task_id)], budget.conversation_bytes),
+            ("Task", [self.control_dir(task_id)], budget.task_bytes),
+        ):
             try:
-                for path, directories, files, directory_fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False, onerror=fail_on_error):
-                    if path.count(os.sep) > 64:
-                        raise ValueError("Task workspace nesting budget exceeded")
-                    count += len(directories) + len(files)
-                    for name in [*directories, *files]:
-                        try:
-                            size += os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_size
-                        except FileNotFoundError:
-                            continue
-                    if size > max_bytes or count > max_entries:
-                        raise ValueError("Task workspace byte/entry budget exceeded")
-            finally:
-                os.close(root_fd)
+                measure_usage(roots, limit)
+            except ValueError as exc:
+                raise ValueError(f"{label}: {exc}") from exc
+        if shutil.disk_usage(self.root).free < budget.min_free_bytes:
+            raise ValueError("Sandbox storage free-space reserve reached; existing files were preserved")
+        if total:
+            try:
+                measure_usage([self.root], budget.total_bytes, 100000)
+            except ValueError as exc:
+                raise ValueError(f"All sandbox storage: {exc}") from exc

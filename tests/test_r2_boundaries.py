@@ -24,7 +24,7 @@ from nekro_agent.services.sandbox.ext_caller import get_api_caller_code
 from nekro_agent.services.sandbox.rpc_broker import RPCBroker
 from nekro_agent.services.sandbox.rpc_grants import RPCGrantRegistry, rpc_grants
 from nekro_agent.services.sandbox.rpc_wire import RPC_MAX_BYTES, decode_rpc_value, encode_rpc_value
-from nekro_agent.services.sandbox.workspace import WorkspaceStore
+from nekro_agent.services.sandbox.workspace import StorageBudget, WorkspaceStore, measure_usage
 from nekro_agent.tools import path_convertor
 from nekro_agent.tools.path_convertor import convert_to_host_path
 from nekro_agent.tools.sandbox_files import snapshot_file
@@ -356,7 +356,64 @@ def test_usage_does_not_follow_external_symlinks(tmp_path: Path) -> None:
     outside.mkdir()
     (outside / "large").write_bytes(b"x" * 50000)
     (store.shared_dir(workspace.task_id) / "outside").symlink_to(outside)
-    store.check_usage(workspace.task_id, 10000)
+    store.check_usage(workspace.task_id, 32768)
+
+
+@pytest.mark.parametrize("scope", ["conversation", "task", "total", "free"])
+def test_storage_budget_preserves_files_and_covers_all_scopes(tmp_path: Path, scope: str) -> None:
+    store = WorkspaceStore(tmp_path)
+    workspace = store.acquire("a" * 32, "chat")
+    saved = store.shared_dir(workspace.task_id) / "saved"
+    saved.write_bytes(b"keep" * 8192)
+    (store.control_dir(workspace.task_id) / "work" / "scratch").write_bytes(b"x" * 32768)
+    limits = dict(conversation_bytes=1024 * 1024, task_bytes=1024 * 1024, total_bytes=4 * 1024 * 1024, min_free_bytes=1)
+    key = {"conversation": "conversation_bytes", "task": "task_bytes", "total": "total_bytes", "free": "min_free_bytes"}[scope]
+    limits[key] = 2**63 if scope == "free" else 1
+    with pytest.raises(ValueError):
+        store.check_budget(workspace.task_id, StorageBudget(**limits))
+    assert saved.read_bytes() == b"keep" * 8192
+
+
+def test_total_budget_counts_other_groups_and_expired_task_storage(tmp_path: Path) -> None:
+    store = WorkspaceStore(tmp_path)
+    first = store.acquire("a" * 32, "chat")
+    second = store.acquire("b" * 32, "other")
+    (store.shared_dir(second.task_id) / "large").write_bytes(b"x" * 131072)
+    store.release(second)
+    budget = StorageBudget(total_bytes=100000, min_free_bytes=1)
+    store.check_budget(first.task_id, budget, total=False)
+    with pytest.raises(ValueError, match="All sandbox storage"):
+        store.check_budget(first.task_id, budget)
+
+
+def test_storage_counts_sparse_files_and_rejects_root_links(tmp_path: Path) -> None:
+    sparse = tmp_path / "sparse"
+    with sparse.open("wb") as stream:
+        stream.truncate(1024 * 1024)
+    with pytest.raises(ValueError):
+        measure_usage([tmp_path], 32768)
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path)
+    with pytest.raises(OSError):
+        measure_usage([link], 2**30)
+
+
+async def test_over_budget_refuses_container_start(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(runner, "HOST_SHARED_DIR", tmp_path / "shared")
+    monkeypatch.setattr(runner, "USER_UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(runner, "prepare_rpc", AsyncMock())
+    monkeypatch.setattr(runner, "storage_budget", lambda: StorageBudget(conversation_bytes=1))
+    monkeypatch.setattr(runner.DBExecCode, "create", AsyncMock())
+    from tests.test_superlily_runtime import FakeDocker
+
+    monkeypatch.setattr(runner.aiodocker, "Docker", FakeDocker)
+    result = await runner.run_code_in_sandbox(SimpleNamespace(code_content="print('must not run')", thought_chain=""), "chat", 1000)
+    assert result[2] == ExecStopType.ERROR.value
+    assert "Conversation" in result[0]
+    runner.prepare_rpc.assert_not_called()
+    for task in runner.chat_key_sandbox_cleanup_task_map.values():
+        task.cancel()
+    await asyncio.gather(*runner.chat_key_sandbox_cleanup_task_map.values(), return_exceptions=True)
 
 
 async def test_runner_cancellation_revokes_grant_and_releases_workspace(tmp_path: Path, monkeypatch) -> None:

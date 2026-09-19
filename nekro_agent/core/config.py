@@ -1704,6 +1704,54 @@ class CoreConfig(ConfigBase):
             ),
         ).model_dump(),
     )
+    SANDBOX_CONVERSATION_MAX_MIB: int = Field(
+        default=256, ge=1,
+        title="单群共享目录上限 (MiB)",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="沙盒配置", en_US="Sandbox Configuration"),
+            i18n_title=i18n_text(zh_CN="单群共享目录上限 (MiB)", en_US="Conversation storage limit (MiB)"),
+            i18n_description=i18n_text(
+                zh_CN="监测式容量限制；超额停止执行，保留已有文件，不自动删除。",
+                en_US="Monitored storage budget; stop execution on excess without deleting existing files.",
+            ),
+        ).model_dump(),
+    )
+    SANDBOX_TASK_MAX_MIB: int = Field(
+        default=128, ge=1,
+        title="单任务临时存储上限 (MiB)",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="沙盒配置", en_US="Sandbox Configuration"),
+            i18n_title=i18n_text(zh_CN="单任务临时存储上限 (MiB)", en_US="Task storage limit (MiB)"),
+            i18n_description=i18n_text(
+                zh_CN="监测式容量限制；超额停止执行，保留已有文件，不自动删除。",
+                en_US="Monitored storage budget; stop execution on excess without deleting existing files.",
+            ),
+        ).model_dump(),
+    )
+    SANDBOX_TOTAL_MAX_MIB: int = Field(
+        default=2048, ge=1,
+        title="沙盒目录总量上限 (MiB)",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="沙盒配置", en_US="Sandbox Configuration"),
+            i18n_title=i18n_text(zh_CN="沙盒目录总量上限 (MiB)", en_US="Total sandbox storage limit (MiB)"),
+            i18n_description=i18n_text(
+                zh_CN="监测式容量限制；超额停止执行，保留已有文件，不自动删除。",
+                en_US="Monitored storage budget; stop execution on excess without deleting existing files.",
+            ),
+        ).model_dump(),
+    )
+    SANDBOX_MIN_FREE_MIB: int = Field(
+        default=2048, ge=1,
+        title="沙盒磁盘保留空间 (MiB)",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="沙盒配置", en_US="Sandbox Configuration"),
+            i18n_title=i18n_text(zh_CN="沙盒磁盘保留空间 (MiB)", en_US="Sandbox free-space reserve (MiB)"),
+            i18n_description=i18n_text(
+                zh_CN="监测式容量限制；超额停止执行，保留已有文件，不自动删除。",
+                en_US="Monitored storage budget; stop execution on excess without deleting existing files.",
+            ),
+        ).model_dump(),
+    )
     SANDBOX_IMAGE_NAME: str = Field(
         default="kromiose/nekro-agent-sandbox",
         title="沙盒镜像名称",

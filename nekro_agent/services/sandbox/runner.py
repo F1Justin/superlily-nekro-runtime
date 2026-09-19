@@ -27,7 +27,7 @@ from nekro_agent.tools.common_util import limited_text_output
 from .ext_caller import CODE_PREAMBLE, get_api_caller_code
 from .rpc_broker import RPCBroker
 from .rpc_grants import RPCGrant, rpc_grants
-from .workspace import Workspace, WorkspaceStore
+from .workspace import StorageBudget, Workspace, WorkspaceStore
 
 _conversation_locks: dict[str, tuple[asyncio.Lock, int]] = {}
 
@@ -77,6 +77,15 @@ def workspace_store() -> WorkspaceStore:
     if root not in _workspace_stores:
         _workspace_stores[root] = WorkspaceStore(root)
     return _workspace_stores[root]
+
+
+def storage_budget() -> StorageBudget:
+    return StorageBudget(
+        conversation_bytes=config.SANDBOX_CONVERSATION_MAX_MIB * 1024 * 1024,
+        task_bytes=config.SANDBOX_TASK_MAX_MIB * 1024 * 1024,
+        total_bytes=config.SANDBOX_TOTAL_MAX_MIB * 1024 * 1024,
+        min_free_bytes=config.SANDBOX_MIN_FREE_MIB * 1024 * 1024,
+    )
 
 
 async def prepare_rpc(ctx: Optional[AgentCtx], chat_key: str, container_key: str) -> tuple[str, RPCGrant]:
@@ -232,6 +241,7 @@ async def _run_code_in_sandbox(
     broker: Optional[RPCBroker] = None
     usage_task: Optional[asyncio.Task] = None
     try:
+        await asyncio.to_thread(store.check_budget, workspace.task_id, storage_budget())
         token, grant = await prepare_rpc(ctx, from_chat_key, container_key)
         grant.remaining_calls = min(grant.remaining_calls, workspace.remaining_calls)
         code_dir = control / "code"
@@ -270,7 +280,13 @@ async def _run_code_in_sandbox(
             config.SANDBOX_RUNNING_TIMEOUT,
         )
         if usage_task.done() and usage_task.exception() is not None:
-            output_text = f"{output_text}\nWorkspace budget exceeded."
+            output_text = f"{output_text}\nWorkspace stopped: {usage_task.exception()}"
+            stop_type = ExecStopType.ERROR
+        try:
+            await asyncio.to_thread(store.check_budget, workspace.task_id, storage_budget())
+        except (ValueError, OSError) as exc:
+            grant.revoked = True
+            output_text = f"{output_text}\nWorkspace stopped: {exc}"
             stop_type = ExecStopType.ERROR
         if stop_type in (ExecStopType.AGENT, ExecStopType.MULTIMODAL_AGENT):
             expected = "agent" if stop_type == ExecStopType.AGENT else "multimodal_agent"
@@ -282,6 +298,9 @@ async def _run_code_in_sandbox(
             else:
                 output_text = str(grant.continuation_result)
         execution_returned = True
+    except (ValueError, OSError) as exc:
+        output_text = f"Sandbox execution refused: {exc}"
+        stop_type = ExecStopType.ERROR
     finally:
         rpc_grants.revoke(token)
         if usage_task is not None:
@@ -309,6 +328,7 @@ async def _run_code_in_sandbox(
     logger.debug(f"容器 {container_name} 输出: {limited_text_output(output_text)} | 退出类型: {stop_type}")
 
     output_name = f"execution-{workspace.epoch}.txt"
+    (control / "diagnostics").mkdir(exist_ok=True)
     (control / "diagnostics" / output_name).write_text(output_text, encoding="utf-8")
     for old_output in sorted((control / "diagnostics").glob("execution-*.txt"), key=lambda path: path.stat().st_mtime)[:-8]:
         old_output.unlink()
@@ -392,10 +412,13 @@ async def run_container_with_timeout(container: DockerContainer, timeout: int) -
 
 
 async def _watch_workspace(store: WorkspaceStore, workspace: Workspace, container: DockerContainer, grant: RPCGrant) -> None:
+    tick = 0
     while True:
         await asyncio.sleep(0.25)
         try:
-            await asyncio.to_thread(store.check_usage, workspace.task_id, MAX_WORKSPACE_BYTES)
+            # Global scans include inactive groups/tasks, but need not run four times a second.
+            await asyncio.to_thread(store.check_budget, workspace.task_id, storage_budget(), total=tick % 8 == 0)
+            tick += 1
         except (ValueError, OSError):
             grant.revoked = True
             await container.kill()
