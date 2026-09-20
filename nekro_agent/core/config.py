@@ -33,6 +33,16 @@ class ModelConfigGroup(ConfigBase):
         title="启用视觉功能",
         description="是否启用视觉能力，如果模型不支持请关闭此选项",
     )
+    ENABLE_AUDIO_INPUT: bool = Field(
+        default=False,
+        title="启用原生音频输入",
+        description="向支持 input_audio 的聊天模型附加当前或明确引用的 QQ 语音；转写仅作参考",
+    )
+    AUDIO_INPUT_DATA_URL: bool = Field(
+        default=False,
+        title="音频使用 Data URL",
+        description="MiMo 原生接口需要 data:audio/wav;base64 前缀；OpenRouter 使用默认的纯 Base64 和 format",
+    )
     ENABLE_COT: bool = Field(
         default=False,
         title="启用外置思维链",

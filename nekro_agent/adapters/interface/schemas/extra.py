@@ -6,6 +6,10 @@ from pydantic import BaseModel, Field
 class PlatformMessageExt(BaseModel):
     """平台消息扩展数据"""
 
+    voice_file_id: str = Field(default="", max_length=4096)
+    ref_voice_file_id: str = Field(default="", max_length=4096)
+    voice_transcript: str = Field(default="", max_length=4096)
+
     ref_chat_key: str = ""  # 引用聊天频道唯一标识
     ref_msg_id: str = ""  # 引用消息的平台消息 ID
     ref_sender_id: str = ""  # 引用消息的发送者平台 ID

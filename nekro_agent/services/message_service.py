@@ -378,6 +378,8 @@ class MessageService:
         random_triggered = random_chat_check(config)
         content_triggered = check_content_trigger(message.content_text, config)
         should_trigger = explicit_triggered or random_triggered or content_triggered
+        if (message.ext_data.get("voice_transcript") or message.ext_data.get("voice_file_id")) and not explicit_triggered:
+            should_trigger = False
         should_notify_quota_exhausted = explicit_triggered or content_triggered
 
         # 纯媒体消息（无文本内容）不触发 AI 回复，仅记录

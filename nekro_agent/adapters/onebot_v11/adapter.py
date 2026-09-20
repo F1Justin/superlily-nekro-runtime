@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Literal, Optional, Type
 
 from fastapi import APIRouter
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageSegment
@@ -15,13 +15,13 @@ from nekro_agent.adapters.interface.schemas.platform import (
 )
 from nekro_agent.adapters.onebot_v11.matchers.message import register_matcher
 from nekro_agent.core import config, logger
+from nekro_agent.core.core_utils import ExtraField
 from nekro_agent.core.os_env import OsEnv
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.schemas.agent_message import AgentMessageSegment, AgentMessageSegmentType
 from nekro_agent.schemas.chat_message import ChatType
 from nekro_agent.schemas.i18n import i18n_text
 from nekro_agent.services.command.schemas import CommandResponse
-from nekro_agent.core.core_utils import ExtraField
 
 from ..interface.base import AdapterMetadata, BaseAdapter, BaseAdapterConfig
 from .core.bot import get_bot
@@ -73,6 +73,32 @@ class OnebotV11Config(BaseAdapterConfig):
                 en_US="When enabled, CQ codes in AI-generated messages will no longer be treated as plain text and will instead be parsed into rich messages by the protocol implementation.",
             ),
         ).model_dump(),
+    )
+
+    VOICE_TRANSCRIPTION_ENABLED: bool = Field(
+        default=False,
+        title="QQ 语音转文字",
+        description="将 QQ 语音转写为聊天输入；叫到人格名称或唤醒词时走普通回复",
+    )
+    VOICE_AUDIO_ENABLED: bool = Field(
+        default=False,
+        title="附加 QQ 原音频",
+        description="在语音识别频道保存音频引用，回复时按需提供给支持原生音频的模型",
+    )
+    VOICE_TRANSCRIPTION_PROVIDER: Literal["napcat", "mimo"] = Field(
+        default="napcat",
+        title="语音识别服务",
+        description="napcat 使用 QQ 转写；mimo 获取 WAV 并调用 MiMo，需要 QQ_VOICE_MIMO_API_KEY 环境变量",
+    )
+    VOICE_TRANSCRIPTION_CHANNELS: List[str] = Field(
+        default_factory=list,
+        title="语音识别频道",
+        description="频道 ID，如 group_123 或 private_456；留空表示所有已启用频道",
+    )
+    VOICE_WAKE_WORDS: List[str] = Field(
+        default_factory=list,
+        title="语音额外唤醒词",
+        description="人格名称始终有效；可添加莉莉、丽丽等识别变体，不改写转写原文",
     )
 
     """NAPCAT 配置"""
@@ -146,8 +172,6 @@ class OnebotV11Adapter(BaseAdapter[OnebotV11Config]):
 
     async def init(self) -> None:
         """初始化适配器"""
-        from . import matchers
-
         register_matcher(self)
 
     async def cleanup(self) -> None:

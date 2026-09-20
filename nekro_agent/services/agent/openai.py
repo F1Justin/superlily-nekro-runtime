@@ -333,6 +333,9 @@ class OpenAIResponse(BaseModel):
                             else:
                                 processed_content.append(f"[图片] {image_url}")
 
+                        elif item_type == "input_audio":
+                            audio = item.get("input_audio", {})
+                            processed_content.append(f"[音频] format={audio.get('format')} base64_length={len(audio.get('data', ''))}")
                         else:
                             # 其他类型
                             processed_content.append(f"[{item_type}] {str(item)[:100]}...")

@@ -37,7 +37,8 @@ async def collect_message(
     # 命令检测与执行（在 is_active 检查之前，确保 na_on 等命令在频道关闭时仍可用）
     chat_key = db_chat_channel.chat_key
     content_text = platform_message.content_text.strip()
-    if content_text and await _try_handle_command(
+    is_voice_transcript = bool(platform_message.ext_data and (platform_message.ext_data.voice_transcript or platform_message.ext_data.voice_file_id))
+    if content_text and not is_voice_transcript and await _try_handle_command(
         adapter, chat_key, platform_user, platform_message, content_text,
     ):
         return

@@ -25,11 +25,12 @@ from nekro_agent.adapters.onebot_v11.tools.onebot_util import (
     get_message_reply_info,
     get_user_name,
 )
+from nekro_agent.adapters.onebot_v11.tools.voice import VoiceTranscriber, is_voice_addressed
 from nekro_agent.core import config, logger
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_user import DBUser
-from nekro_agent.schemas.chat_message import ChatMessageSegmentForward
+from nekro_agent.schemas.chat_message import ChatMessageSegment, ChatMessageSegmentForward, ChatMessageSegmentType
 
 
 async def _build_reply_ext(
@@ -86,6 +87,10 @@ async def _build_reply_ext(
             ref_content_text=content_text[:4096],
             ref_content_data=[segment.model_dump(mode="json") for segment in content_data[:16]],
             ref_send_timestamp=event.reply.time,
+            ref_voice_file_id=next((
+                str(seg.data.get("file_id") or seg.data.get("file") or "")
+                for seg in event.reply.message if seg.type == "record"
+            ), ""),
         )
     # Reply enrichment must never make an otherwise valid incoming message disappear.
     except Exception as exc:
@@ -97,6 +102,8 @@ async def _build_reply_ext(
 
 
 def register_matcher(adapter: BaseAdapter):
+    voice_transcriber = VoiceTranscriber()
+
     @on_message(priority=99999, block=False).handle()
     async def _(_: Matcher, event: Union[MessageEvent, GroupMessageEvent], bot: Bot):
         """消息匹配器"""
@@ -123,10 +130,38 @@ def register_matcher(adapter: BaseAdapter):
             user_avatar=user_avatar,
         )
 
+        voice_file_id = ""
+        voice_text = ""
+        voice_addressed = False
+        has_voice = any(segment.type == "record" for segment in event.message)
+        voice_enabled = getattr(adapter.config, "VOICE_TRANSCRIPTION_ENABLED", False)
+        voice_channels = getattr(adapter.config, "VOICE_TRANSCRIPTION_CHANNELS", [])
+        if has_voice and voice_enabled and (not voice_channels or channel_id in voice_channels):
+            if db_chat_channel.is_active and not db_chat_channel.observe_mode and str(event.user_id) != bot.self_id:
+                if not voice_transcriber.claim(bot.self_id, str(event.message_id)):
+                    return
+                record = next(segment for segment in event.message if segment.type == "record")
+                if getattr(adapter.config, "VOICE_AUDIO_ENABLED", False):
+                    voice_file_id = str(record.data.get("file_id") or record.data.get("file") or "")
+                voice_text = await voice_transcriber.transcribe(
+                    bot, str(event.message_id),
+                    provider=getattr(adapter.config, "VOICE_TRANSCRIPTION_PROVIDER", "napcat"),
+                    file_id=str(record.data.get("file_id") or record.data.get("file") or ""),
+                )
+                if voice_text:
+                    preset = await db_chat_channel.get_preset()
+                    voice_addressed = is_voice_addressed(
+                        voice_text, preset.name, getattr(adapter.config, "VOICE_WAKE_WORDS", []),
+                    )
+
         # 消息内容处理
         content_data, msg_tome, message_id = await convert_chat_message(
             event, event.to_me, bot, db_chat_channel, adapter
         )
+        if voice_text:
+            content_data.append(ChatMessageSegment(type=ChatMessageSegmentType.TEXT, text=f"[语音转写] {voice_text}"))
+        elif voice_file_id:
+            content_data.append(ChatMessageSegment(type=ChatMessageSegmentType.TEXT, text="[语音消息：暂无可用转写]"))
         if not content_data:  # 忽略无法转换的消息
             logger.warning(f"无法转换的消息: {event.get_plaintext()}")
             return
@@ -145,6 +180,12 @@ def register_matcher(adapter: BaseAdapter):
                 content_text = seg.text
                 break
 
+        if voice_text:
+            content_text = f"{content_text}\n[语音转写] {voice_text}".strip()
+
+        elif voice_file_id:
+            content_text = f"{content_text}\n[语音消息：暂无可用转写]".strip()
+
         ignored_prefixes = (
             [config.AI_COMMAND_OUTPUT_PREFIX, *config.AI_IGNORED_PREFIXES]
             if config.AI_COMMAND_OUTPUT_PREFIX
@@ -155,6 +196,8 @@ def register_matcher(adapter: BaseAdapter):
             return
 
         reply_ext = await _build_reply_ext(event, bot, db_chat_channel, adapter)
+        reply_ext.voice_transcript = voice_text
+        reply_ext.voice_file_id = voice_file_id
 
         plt_msg: PlatformMessage = PlatformMessage(
             message_id=message_id,
@@ -163,7 +206,7 @@ def register_matcher(adapter: BaseAdapter):
             sender_nickname=sender_nickname,
             content_data=content_data,
             content_text=content_text,
-            is_tome=bool(is_tome or msg_tome),
+            is_tome=bool(is_tome or msg_tome or voice_addressed),
             timestamp=int(time.time()),
             ext_data=reply_ext,
         )

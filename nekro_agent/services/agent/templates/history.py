@@ -35,6 +35,7 @@ from nekro_agent.tools.path_convertor import (
 )
 
 from ..creator import ContentSegment, OpenAIChatMessage
+from .audio import build_audio_content
 from .base import PromptTemplate, env, register_template
 
 logger = get_sub_logger("agent_runtime")
@@ -637,6 +638,39 @@ def _select_history_images(
     return selected
 
 
+async def _select_audio_candidates(
+    chat_key: str,
+    focus_message_id: Optional[str],
+    reply_focus: Optional[ReplyFocus],
+    recent_messages: List[DBChatMessage],
+) -> list[tuple[str, str, str]]:
+    if not chat_key.startswith("onebot_v11-"):
+        return []
+    current = reply_focus.trigger_message if reply_focus else next(
+        (msg for msg in recent_messages if msg.message_id == focus_message_id), None,
+    )
+    if current is None and focus_message_id:
+        current = await DBChatMessage.filter(chat_key=chat_key, message_id=focus_message_id).order_by("-id").first()
+    result: list[tuple[str, str, str]] = []
+    ext = current.ext_data_obj if current else PlatformMessageExt()
+    if current and current.chat_key == chat_key and (ext.voice_file_id or ext.voice_transcript):
+        result.append((current.message_id, ext.voice_file_id, "current_request"))
+    if reply_focus and reply_focus.referenced_message:
+        ref = reply_focus.referenced_message
+        if ref.chat_key == chat_key and (ref.ext_data_obj.voice_file_id or ref.ext_data_obj.voice_transcript):
+            result.append((ref.message_id, ref.ext_data_obj.voice_file_id, "explicit_reference"))
+    elif reply_focus and ext.ref_voice_file_id:
+        result.append((reply_focus.referenced_message_id, ext.ref_voice_file_id, "explicit_reference"))
+    # The caller supplies the same chronological window rendered as text.
+    for message in reversed(recent_messages):
+        if message.chat_key == chat_key and (message.ext_data_obj.voice_file_id or message.ext_data_obj.voice_transcript):
+            result.append((message.message_id, message.ext_data_obj.voice_file_id, "recent_history"))
+    unique: dict[str, tuple[str, str, str]] = {}
+    for item in result:
+        unique.setdefault(item[0], item)
+    return list(unique.values())
+
+
 async def render_history_data(
     chat_key: str,
     db_chat_channel: DBChatChannel,
@@ -802,6 +836,17 @@ async def render_history_data(
                 f"</{one_time_code} | recent_chat_images>\n\n",
             ),
         )
+
+    if model_group.ENABLE_AUDIO_INPUT:
+        from nekro_agent.adapters.utils import adapter_utils
+
+        adapter = await adapter_utils.get_adapter_for_chat(chat_key)
+        channels = getattr(adapter.config, "VOICE_TRANSCRIPTION_CHANNELS", [])
+        if getattr(adapter.config, "VOICE_AUDIO_ENABLED", False) and (
+            not channels or db_chat_channel.channel_id in channels
+        ):
+            candidates = await _select_audio_candidates(chat_key, focus_message_id, reply_focus, recent_chat_messages)
+            openai_chat_message.batch_add(await build_audio_content(candidates, data_url=model_group.AUDIO_INPUT_DATA_URL))
 
     # 注入记忆上下文
     memory_messages = [*reserved_messages, *recent_chat_messages]
