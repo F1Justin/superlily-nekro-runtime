@@ -788,6 +788,7 @@ async def gen_openai_chat_response(
                 _apply_usage(res.usage)
 
     except Exception as e:
+        setattr(e, "nekro_partial_response", bool(output or thought_chain))
         logger.exception(f"OpenAI请求失败: {e}")
         response = OpenAIErrResponse.create_from_exception(
             e,

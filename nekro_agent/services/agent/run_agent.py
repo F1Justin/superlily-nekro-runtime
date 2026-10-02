@@ -18,6 +18,7 @@ from nekro_agent.services.plugin.collector import plugin_collector
 from nekro_agent.services.sandbox.runner import limited_run_code
 
 from .creator import OpenAIChatMessage
+from .egress_client import EgressClient, is_egress_failure
 from .openai import OpenAIResponse, gen_openai_chat_response
 from .resolver import ParsedCodeRunData, parse_chat_response
 from .templates.compiler import PromptCompiler
@@ -380,9 +381,13 @@ async def send_agent_request(
         if is_debug_iteration and config.DEBUG_MIGRATION_MODEL_GROUP
         else config.MODEL_GROUPS[config.USE_MODEL_GROUP]
     )
-    fallback_model_group: ModelConfigGroup = (
-        config.MODEL_GROUPS[config.FALLBACK_MODEL_GROUP] if config.FALLBACK_MODEL_GROUP else model_group
-    )
+    egress = EgressClient()
+    managed = egress.manages(model_group.CHAT_PROXY, model_group.BASE_URL)
+    lease = await egress.lease() if managed else None
+    tried_nodes: set[str] = set()
+    if lease is not None and lease.exhausted:
+        raise AllLLMRequestsFailedError("全部代理节点不可用")
+    retry_total = len(lease.candidates) if lease is not None else config.AI_CHAT_LLM_API_MAX_RETRIES
 
     if config.SAVE_PROMPTS_LOG:
         log_path = f"{PROMPT_LOG_DIR}/chat_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
@@ -393,16 +398,16 @@ async def send_agent_request(
     used_model_group: ModelConfigGroup = model_group  # 记录实际使用的模型组
     retry_errors: list[str] = []
 
-    for i in range(config.AI_CHAT_LLM_API_MAX_RETRIES):
-        use_model_group: ModelConfigGroup = (
-            model_group if i < config.AI_CHAT_LLM_API_MAX_RETRIES - 1 else fallback_model_group
-        )
+    for i in range(retry_total):
+        use_model_group = model_group
+        if lease is not None:
+            tried_nodes.add(lease.node)
         retry_index = i + 1
         if on_llm_attempt is not None:
-            await on_llm_attempt(retry_index, config.AI_CHAT_LLM_API_MAX_RETRIES, use_model_group.CHAT_MODEL)
+            await on_llm_attempt(retry_index, retry_total, use_model_group.CHAT_MODEL)
 
         logger.info(
-            f"[send_agent_request] {chat_key} | 发送 LLM 请求 model={use_model_group.CHAT_MODEL} retry={i}/{config.AI_CHAT_LLM_API_MAX_RETRIES}"
+            f"[send_agent_request] {chat_key} | 发送 LLM 请求 model={use_model_group.CHAT_MODEL} retry={i}/{retry_total}"
         )
         try:
             llm_response: OpenAIResponse = await gen_openai_chat_response(
@@ -417,7 +422,7 @@ async def send_agent_request(
                 base_url=use_model_group.BASE_URL,
                 api_key=use_model_group.API_KEY,
                 stream_mode=config.AI_REQUEST_STREAM_MODE,
-                proxy_url=use_model_group.CHAT_PROXY,
+                proxy_url=lease.proxy if lease is not None else use_model_group.CHAT_PROXY,
                 max_wait_time=config.AI_GENERATE_TIMEOUT,
                 first_token_timeout=config.AI_STREAM_FIRST_TOKEN_TIMEOUT,
                 log_path=log_path,
@@ -433,16 +438,23 @@ async def send_agent_request(
             error_summary = _summarize_runtime_text(str(e))
             retry_errors.append(str(e))
             logger.error(
-                f"LLM 请求失败: {e} ｜ 使用模型: {use_model_group.CHAT_MODEL} {'(fallback)' if i == config.AI_CHAT_LLM_API_MAX_RETRIES - 1 else ''}",
+                f"LLM 请求失败: {e} ｜ 使用模型: {use_model_group.CHAT_MODEL} {'(代理节点轮换)' if managed else ''}",
             )
             if on_llm_retry is not None:
                 await on_llm_retry(
-                    retry_index, config.AI_CHAT_LLM_API_MAX_RETRIES, use_model_group.CHAT_MODEL, error_summary
+                    retry_index, retry_total, use_model_group.CHAT_MODEL, error_summary
                 )
             # 避免重复添加，转换为Path对象并比较绝对路径
             err_log_path_obj = Path(err_log_path)
             if not any(str(log_path.absolute()) == str(err_log_path_obj.absolute()) for log_path in RECENT_ERR_LOGS):
                 RECENT_ERR_LOGS.append(err_log_path_obj)
+            if managed:
+                if not is_egress_failure(e):
+                    raise
+                lease = await egress.lease(lease, tried_nodes)
+                if lease.exhausted:
+                    raise AllLLMRequestsFailedError("全部代理节点已尝试，模型请求失败") from e
+                logger.info(f"模型请求切换代理节点: {lease.node}")
             continue
         else:
             used_model_group = use_model_group  # 记录成功使用的模型组
