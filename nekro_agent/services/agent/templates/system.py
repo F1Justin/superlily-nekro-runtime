@@ -3,7 +3,7 @@ from .base import PromptTemplate, register_template
 
 @register_template("policy_kernel.j2", "policy_kernel_prompt")
 class PolicyKernelPrompt(PromptTemplate):
-    pass
+    cacheable_history: bool = False
 
 
 @register_template("runtime_contract.j2", "runtime_contract_prompt")

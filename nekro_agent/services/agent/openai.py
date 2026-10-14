@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from nekro_agent.core import config, logger
 
+from .cache_policy import uses_argon_implicit_cache
 from .creator import OpenAIChatMessage
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -588,12 +589,18 @@ async def gen_openai_chat_response(
 
     normalized_host = (urlparse(base_url).hostname or "").lower() if base_url else ""
     is_openrouter = normalized_host == "openrouter.ai" or normalized_host.endswith(".openrouter.ai")
-    use_explicit_gemini_cache = is_openrouter and "gemini" in model.lower()
+    use_explicit_gemini_cache = (
+        is_openrouter and "gemini" in model.lower() and not uses_argon_implicit_cache(model, base_url or "")
+    )
 
-    # Gemini prompt caching on OpenRouter requires an explicit breakpoint.
+    # Legacy Gemini uses explicit breakpoints; Argon caches the unchanged prefix implicitly.
     messages = [
-        msg.to_dict(include_cache_control=use_explicit_gemini_cache) if isinstance(msg, OpenAIChatMessage) else msg
+        serialized
         for msg in messages
+        for serialized in (
+            msg.to_dicts(include_cache_control=use_explicit_gemini_cache)
+            if isinstance(msg, OpenAIChatMessage) else [msg]
+        )
     ]
 
     # Parse extra_body if it is a string

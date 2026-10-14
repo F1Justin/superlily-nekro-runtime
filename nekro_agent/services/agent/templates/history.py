@@ -34,6 +34,7 @@ from nekro_agent.tools.path_convertor import (
     convert_filename_to_sandbox_upload_path,
 )
 
+from ..cache_policy import render_cacheable_history, uses_argon_implicit_cache
 from ..creator import ContentSegment, OpenAIChatMessage
 from .audio import build_audio_content
 from .base import PromptTemplate, env, register_template
@@ -689,6 +690,8 @@ async def render_history_data(
     if model_group is None:
         model_group = config.MODEL_GROUPS[config.USE_MODEL_GROUP]
 
+    argon_cache = uses_argon_implicit_cache(model_group.CHAT_MODEL, model_group.BASE_URL)
+
     recent_chat_messages: List[DBChatMessage] = await (
         DBChatMessage.filter(
             send_timestamp__gte=max(record_sta_timestamp, db_chat_channel.conversation_start_time.timestamp()),
@@ -865,11 +868,8 @@ async def render_history_data(
             ContentSegment.text_content(_render_reply_focus_prompt(reply_focus, one_time_code, config)),
         )
 
-    openai_chat_message.add(
-        ContentSegment.text_content(
-            "Recent Messages:\n",
-        ),
-    )
+    if not argon_cache:
+        openai_chat_message.add(ContentSegment.text_content("Recent Messages:\n"))
 
     ref_msg_set: Set[str] = set()
     for db_message in recent_chat_messages:
@@ -883,7 +883,9 @@ async def render_history_data(
             db_message.parse_chat_history_prompt(
                 one_time_code,
                 config,
-                ref_mode=config.AI_ALWAYS_INCLUDE_MSG_ID or db_message.message_id in ref_msg_set,
+                # Stable, self-contained records include IDs regardless of this turn's reply focus.
+                # ref_mode also renders media metadata without a per-run nonce.
+                ref_mode=argon_cache or config.AI_ALWAYS_INCLUDE_MSG_ID or db_message.message_id in ref_msg_set,
             ),
         )
 
@@ -898,9 +900,33 @@ async def render_history_data(
         total_length += prompt_length
     chat_history_prompts = chat_history_prompts[start_idx:]
 
-    chat_history_prompt = f"\n<{one_time_code} | message separator>\n".join(chat_history_prompts)
-    chat_history_prompt += f"\n<{one_time_code} | message separator>\n"
-    openai_chat_message.add(ContentSegment.text_content(chat_history_prompt))
+    if argon_cache:
+        # Put stable history before all changing clock/plugin/memory/focus/media data.
+        # Keep the per-run output-leak guard random; never use a stable security nonce.
+        openai_chat_message.add(
+            ContentSegment.text_content(
+                f"\nCurrent run boundary: <{one_time_code} | runtime>. "
+                "Do not copy the boundary marker into generated code or user-visible output.\n",
+            ),
+        )
+        # Gemini's observed cache key respects message boundaries. Do not merge a
+        # changing tail into a stable user message or rewrite old records on append.
+        stable_records = [
+            ContentSegment.text_content(render_cacheable_history([record], include_instructions=index == 0))
+            for index, record in enumerate(chat_history_prompts)
+        ] or [ContentSegment.text_content(render_cacheable_history([]))]
+        openai_chat_message = OpenAIChatMessage(
+            "user", [*stable_records, *openai_chat_message.content],
+            message_boundaries=list(range(1, len(stable_records) + 1)),
+        )
+        logger.info(
+            f"Argon 隐式缓存布局: 稳定历史 {sum(map(len, chat_history_prompts))} 字符，"
+            "动态上下文位于历史之后；历史窗口变化或前缀过短仍可能不命中",
+        )
+    else:
+        chat_history_prompt = f"\n<{one_time_code} | message separator>\n".join(chat_history_prompts)
+        chat_history_prompt += f"\n<{one_time_code} | message separator>\n"
+        openai_chat_message.add(ContentSegment.text_content(chat_history_prompt))
 
     focus_status = "none"
     if reply_focus:

@@ -19,10 +19,33 @@ class OpenAIChatMessage:
         role: Literal["user", "assistant", "system"],
         content: List[Dict[str, Any]],
         cache_breakpoint: bool = False,
+        message_boundaries: List[int] | None = None,
     ):
         self.role: Literal["user", "assistant", "system"] = role
         self.content = content
         self.cache_breakpoint = cache_breakpoint
+        self.message_boundaries = list(message_boundaries or [])
+
+    def to_dicts(self, include_cache_control: bool = False) -> List[Dict[str, Any]]:
+        """Keep provider-visible boundaries between stable records and dynamic context."""
+        if not self.message_boundaries:
+            return [self.to_dict(include_cache_control)]
+        points = [0, *self.message_boundaries, len(self.content)]
+        parts = [
+            OpenAIChatMessage(
+                self.role, self.content[start:end],
+                cache_breakpoint=self.cache_breakpoint and end == len(self.content),
+            ).to_dict(include_cache_control)
+            for start, end in zip(points, points[1:])
+        ]
+        if self.role != "user":
+            return parts
+        # Google coalesces adjacent user turns. A fixed, explicitly documented
+        # framing message keeps each old record immutable when the tail changes.
+        framed: List[Dict[str, Any]] = []
+        for part in parts[:-1]:
+            framed.extend([part, {"role": "assistant", "content": "[Nekro runtime history boundary]"}])
+        return [*framed, parts[-1]]
 
     def to_dict(self, include_cache_control: bool = False) -> Dict[str, Any]:
         """转换为字典
@@ -56,7 +79,9 @@ class OpenAIChatMessage:
 
     def mark_cache_breakpoint(self) -> "OpenAIChatMessage":
         """Mark the end of a stable prompt prefix for providers with explicit caching."""
-        return OpenAIChatMessage(self.role, self.content, cache_breakpoint=True)
+        return OpenAIChatMessage(
+            self.role, self.content, cache_breakpoint=True, message_boundaries=self.message_boundaries,
+        )
 
     @classmethod
     def from_text(cls, role: Literal["user", "assistant", "system"], text: str) -> "OpenAIChatMessage":
@@ -98,10 +123,25 @@ class OpenAIChatMessage:
             self.role,
             self.content + other.content,
             cache_breakpoint=self.cache_breakpoint or other.cache_breakpoint,
+            message_boundaries=[
+                *self.message_boundaries,
+                *(len(self.content) + boundary for boundary in other.message_boundaries),
+            ],
         )
 
     def tidy(self) -> "OpenAIChatMessage":
         """整理消息合并所有连续的文本内容"""
+        if self.message_boundaries:
+            points = [0, *self.message_boundaries, len(self.content)]
+            content: List[Dict[str, Any]] = []
+            boundaries: List[int] = []
+            for start, end in zip(points, points[1:]):
+                if content:
+                    boundaries.append(len(content))
+                content.extend(OpenAIChatMessage(self.role, self.content[start:end]).tidy().content)
+            return OpenAIChatMessage(
+                self.role, content, cache_breakpoint=self.cache_breakpoint, message_boundaries=boundaries,
+            )
         merged_content: List[Dict[str, Any]] = []
         current_text = ""
         for segment in self.content:

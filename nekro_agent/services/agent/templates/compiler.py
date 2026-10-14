@@ -35,6 +35,7 @@ class PromptCompiler:
         plugins_prompt: str,
         plugins_runtime_prompt: str,
         enable_cot: bool,
+        cacheable_history: bool = False,
     ):
         self.platform_name = platform_name
         self.bot_platform_id = bot_platform_id
@@ -42,10 +43,11 @@ class PromptCompiler:
         self.plugins_prompt = plugins_prompt
         self.plugins_runtime_prompt = plugins_runtime_prompt
         self.enable_cot = enable_cot
+        self.cacheable_history = cacheable_history
 
     def compile_segments(self) -> PromptSegments:
         return PromptSegments(
-            stable_static=PolicyKernelPrompt().render(default_env),
+            stable_static=PolicyKernelPrompt(cacheable_history=self.cacheable_history).render(default_env),
             channel_static=PersonaPrompt(chat_preset=self.chat_preset).render(default_env),
             runtime_dynamic=RuntimeContractPrompt(
                 platform_name=self.platform_name,
