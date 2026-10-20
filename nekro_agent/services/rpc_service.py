@@ -71,6 +71,7 @@ async def dispatch_rpc_request(raw_body: bytes, grant: RPCGrant) -> dict[str, An
             if method_type in (SandboxMethodType.AGENT, SandboxMethodType.MULTIMODAL_AGENT):
                 grant.continuation = method_type.value
                 grant.continuation_result = result
-            if method_type in (SandboxMethodType.AGENT, SandboxMethodType.BEHAVIOR):
+                grant.transient_result = not getattr(method, "_persist_result", True)
+            if method_type in (SandboxMethodType.AGENT, SandboxMethodType.BEHAVIOR) and not grant.transient_result:
                 await message_service.push_system_message(chat_key=grant.ctx.chat_key, agent_messages=str(result))
         return response

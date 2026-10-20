@@ -19,6 +19,7 @@ class RPCGrant:
     revoked: bool = False
     continuation: str = ""
     continuation_result: Any = None
+    transient_result: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 

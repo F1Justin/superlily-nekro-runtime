@@ -338,6 +338,8 @@ class NekroPlugin:
         method_type: SandboxMethodType,
         name: str,
         description: str = "",
+        *,
+        persist_result: bool = True,
     ) -> Callable[[Callable], Callable]:
         """挂载沙盒方法
 
@@ -347,13 +349,17 @@ class NekroPlugin:
             method_type (SandboxMethodType): 方法类型
             name (str): 方法名称
             description (str): 方法描述
+            persist_result (bool): 是否将返回值写入聊天历史和执行记录；仅 AGENT 可关闭。
 
         Returns:
             装饰器函数
         """
 
         def decorator(func: Callable) -> Callable:
+            if not persist_result and method_type != SandboxMethodType.AGENT:
+                raise ValueError("Only AGENT methods support transient results")
             func._method_type = method_type  # noqa: SLF001  # pyright: ignore[reportFunctionMemberAccess]
+            func._persist_result = persist_result  # noqa: SLF001  # pyright: ignore[reportFunctionMemberAccess]
             self.sandbox_methods.append(SandboxMethod(method_type, name, description, func))
             # logger.debug(f"从插件 {self.name} 挂载沙盒方法 {name} 成功")
             return func

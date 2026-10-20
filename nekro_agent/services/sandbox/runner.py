@@ -325,31 +325,33 @@ async def _run_code_in_sandbox(
     # 记录总耗时（生成耗时 + 执行耗时）
     total_time = generation_time_ms + exec_time
 
-    logger.debug(f"容器 {container_name} 输出: {limited_text_output(output_text)} | 退出类型: {stop_type}")
+    transient_result = grant is not None and grant.transient_result
+    recorded_output = "[Transient agent result omitted]" if transient_result else output_text
+    logger.debug(f"容器 {container_name} 输出: {limited_text_output(recorded_output)} | 退出类型: {stop_type}")
 
     output_name = f"execution-{workspace.epoch}.txt"
     (control / "diagnostics").mkdir(exist_ok=True)
-    (control / "diagnostics" / output_name).write_text(output_text, encoding="utf-8")
+    (control / "diagnostics" / output_name).write_text(recorded_output, encoding="utf-8")
     for old_output in sorted((control / "diagnostics").glob("execution-*.txt"), key=lambda path: path.stat().st_mtime)[:-8]:
         old_output.unlink()
 
     final_output = (
         output_text
-        if len(output_text) <= output_limit
+        if transient_result or len(output_text) <= output_limit
         else limited_text_output(
             output_text,
             limit=output_limit,
             placeholder=f"...(output too long, hidden {len(output_text) - output_limit} characters)...",
         )
     )
-    if len(output_text) > output_limit:
+    if not transient_result and len(output_text) > output_limit:
         final_output += f"\nFull bounded output: /app/diagnostics/{output_name} (read within this task)."
 
     await DBExecCode.create(
         chat_key=from_chat_key,
         code_text=code_run_data.code_content,
         thought_chain=code_run_data.thought_chain or (llm_response.thought_chain if llm_response else ""),
-        outputs=final_output,
+        outputs=recorded_output if transient_result else final_output,
         success=stop_type
         in [
             ExecStopType.NORMAL,
