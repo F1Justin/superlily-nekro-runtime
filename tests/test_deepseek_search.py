@@ -20,16 +20,14 @@ from nekro_agent.services.sandbox.rpc_wire import encode_rpc_value
 from plugins.builtin import deepseek_search as search_plugin
 
 
-def completion(source_id: int = 1, finish: str = "stop") -> dict:
+def completion(content: str = "接口已发布", finish: str = "stop") -> dict:
     return {
-        "id": "test", "choices": [{"finish_reason": finish, "message": {"content": json.dumps({
-            "facts": [{"text": "接口已发布", "source_ids": [source_id]}], "uncertainty": "",
-        })}}],
+        "id": "test", "choices": [{"finish_reason": finish, "message": {"content": content}}],
         "usage": {"prompt_tokens": 1000, "completion_tokens": 100, "prompt_cache_hit_tokens": 100},
     }
 
 
-async def test_search_digest_uses_short_context_and_validated_source_ids() -> None:
+async def test_search_digest_returns_short_plain_text() -> None:
     requests = []
 
     def handle(request):
@@ -43,13 +41,16 @@ async def test_search_digest_uses_short_context_and_validated_source_ids() -> No
         assert str(request.url) == CHAT_URL
         assert body["thinking"] == {"type": "disabled"}
         assert len(json.loads(body["messages"][1]["content"])["sources"][0]["material"]) == 1200
+        assert body["messages"][0]["content"] == "根据搜索结果回答search query的内容，100字以内回复"
+        assert "response_format" not in body
         assert "tools" not in body
         return httpx.Response(200, json=completion())
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         outcome = await search_and_digest(client, "secret", "发布日期")
     assert len(requests) == 2
-    assert "https://example.org/release" in outcome.context
+    assert outcome.context == "接口已发布"
+    assert outcome.metrics["sources"][0]["url"] == "https://example.org/release"
     assert "s" * 500 not in outcome.context
     assert outcome.metrics["search_cost_usd_estimate"] == 0.00075
     assert outcome.metrics["model_cost_usd_estimate_min"] == pytest.approx(0.0001953)
@@ -70,12 +71,12 @@ async def test_no_sources_does_not_invoke_summarizer(results) -> None:
     assert "未核实" in outcome.context
 
 
-@pytest.mark.parametrize("source_id,finish", [(0, "stop"), (2, "stop"), (1, "length")])
-async def test_invalid_or_truncated_digest_is_rejected(source_id, finish) -> None:
+@pytest.mark.parametrize("content,finish", [("", "stop"), ("   ", "stop"), ("未完成", "length")])
+async def test_empty_or_truncated_digest_is_rejected(content, finish) -> None:
     def handle(request):
         if str(request.url) == SEARCH_URL:
             return httpx.Response(200, json={"results": [{"url": "https://example.org"}]})
-        return httpx.Response(200, json=completion(source_id, finish))
+        return httpx.Response(200, json=completion(content, finish))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
         with pytest.raises(ValueError):
