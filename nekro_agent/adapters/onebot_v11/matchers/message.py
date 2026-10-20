@@ -1,3 +1,5 @@
+import asyncio
+import json
 import time
 from typing import Optional, Union
 
@@ -243,6 +245,20 @@ def register_matcher(adapter: BaseAdapter):
         content_data, msg_tome, message_id = await convert_chat_message(event, False, bot, db_chat_channel, adapter)
         if not content_data:  # 忽略无法转换的消息
             return
+
+        # NapCat also emits a normal message carrying a usable message_id; prefer that record.
+        await asyncio.sleep(1)
+        recent = await DBChatMessage.filter(
+            chat_key=db_chat_channel.chat_key,
+            sender_id=platform_userid,
+            send_timestamp__gte=int(time.time()) - 10,
+        ).order_by("-id").limit(32)
+        paths = {getattr(segment, "local_path", None) for segment in content_data} - {None}
+        for message in recent:
+            if message.message_id and any(
+                segment.get("local_path") in paths for segment in json.loads(message.content_data)
+            ):
+                return
 
         sender_nickname: str = await get_user_name(
             event=event,

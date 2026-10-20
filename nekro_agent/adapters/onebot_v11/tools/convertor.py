@@ -1,27 +1,24 @@
 import asyncio
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
-
 from nonebot.adapters.onebot.v11 import (
-
     Bot,
     GroupMessageEvent,
     GroupUploadNoticeEvent,
     Message,
     MessageEvent,
+    MessageSegment,
 )
 
 from nekro_agent.adapters.interface.base import BaseAdapter
+from nekro_agent.adapters.onebot_v11.tools.attachments import OneBotFile, ingest_onebot_file
 from nekro_agent.adapters.onebot_v11.tools.onebot_util import get_user_group_card_name
 from nekro_agent.core.config import config
 from nekro_agent.core.logger import get_sub_logger
-from nekro_agent.core.os_env import NAPCAT_TEMPFILE_DIR
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.schemas.chat_message import (
-
     ChatMessageSegment,
     ChatMessageSegmentAt,
     ChatMessageSegmentFile,
@@ -414,76 +411,31 @@ def _generate_json_card_summary(card_info: dict[str, str | None]) -> str:
 
 
 async def _build_file_segment_from_onebot_file(
-    seg: dict,
+    seg: MessageSegment,
     bot: Bot,
     from_chat_key: str,
 ) -> Optional[ChatMessageSegmentFile]:
-    """从 OneBot 文件消息段构建 ChatMessageSegmentFile
-
-    优先级：本地路径 → NapCat 临时目录 → get_file API（临时目录路径 → URL 下载）
-
-    Args:
-        seg: OneBot MessageSegment 的 data 字典
-        bot: Bot 实例
-        from_chat_key: 聊天频道标识
-
-    Returns:
-        ChatMessageSegmentFile 或 None（所有方式均失败时）
-    """
-    file_path = seg.data["file"]
-    if file_path.startswith("file:"):
-        file_path = file_path[len("file:"):]
-
-    # 1. 尝试本地路径
-    local_path = Path(file_path)
-    if not local_path.exists():
-        local_path = Path(NAPCAT_TEMPFILE_DIR) / local_path.name
-
-    if local_path.exists():
-        return await ChatMessageSegmentFile.create_form_local_path(
-            local_path=str(local_path),
-            from_chat_key=from_chat_key,
-            file_name=seg.data.get("name", ""),
-        )
-
-    # 2. 无 file_id，无法继续
-    if "file_id" not in seg.data:
-        logger.warning(f"文件不存在且无 file_id: {seg}")
-        return None
-
-    # 3. 通过 get_file API 获取文件信息
     try:
-        file_data = await asyncio.wait_for(
-            bot.call_api("get_file", file_id=seg.data["file_id"]),
-            timeout=30.0,
+        data = seg.data
+        name = str(data.get("name") or data.get("file") or "attachment")
+        expected_size = data.get("file_size", data.get("size"))
+        if expected_size is not None:
+            expected_size = int(expected_size)
+        if data.get("url", "").startswith(("https://", "http://")):
+            file = OneBotFile(url=data["url"])
+        elif data.get("file_id"):
+            file = OneBotFile.model_validate(await asyncio.wait_for(
+                bot.call_api("get_file", file_id=data["file_id"]), timeout=30,
+            ))
+        else:
+            file = OneBotFile(file=str(data.get("file", "")))
+        return await ingest_onebot_file(
+            file, from_chat_key, display_name=name, expected_size=expected_size,
+            max_bytes=config.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
         )
-    except asyncio.TimeoutError:
-        logger.warning(f"调用 get_file 超时 (file_id={seg.data['file_id']})")
+    except Exception as exc:
+        logger.warning(f"文件校验或下载失败: {exc}")
         return None
-    except Exception:
-        logger.exception(f"调用 get_file 异常 (file_id={seg.data['file_id']})")
-        return None
-
-    # 3a. 检查 NapCat 临时目录
-    napcat_path = Path(NAPCAT_TEMPFILE_DIR) / file_data.get("file_name", "")
-    if napcat_path.exists():
-        return await ChatMessageSegmentFile.create_form_local_path(
-            local_path=str(napcat_path),
-            from_chat_key=from_chat_key,
-            file_name=file_data.get("file_name", ""),
-        )
-
-    # 3b. 通过 URL 下载
-    file_url = file_data.get("url", "")
-    if file_url and file_url.startswith("http"):
-        return await ChatMessageSegmentFile.create_from_url(
-            url=file_url,
-            from_chat_key=from_chat_key,
-            file_name=seg.data.get("name", ""),
-        )
-
-    logger.warning(f"无法获取文件下载链接: {seg}")
-    return None
 
 
 def parse_onebot_json_segment(seg: dict) -> tuple[str, dict[str, str | None], dict]:
@@ -591,45 +543,21 @@ async def convert_chat_message(
         if ob_event.file.size > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
             logger.warning(f"文件过大，跳过处理: {ob_event.file.name}")
             return ret_list, False, ""
-        if ob_event.file.model_extra and ob_event.file.model_extra.get("url"):
-            suffix = "." + ob_event.file.name.rsplit(".", 1)[-1]
-            if not ob_event.file.model_extra["url"].startswith("http"):
-                logger.warning(f"上传文件无法获取到直链: {ob_event.file.model_extra['url']}")
-                return ret_list, False, ""
-            ret_list.append(
-                await ChatMessageSegmentFile.create_from_url(
-                    url=ob_event.file.model_extra["url"],
-                    from_chat_key=db_chat_channel.chat_key,
-                ),
-            )
-        elif ob_event.file.id:
-            try:
-                file_data = await asyncio.wait_for(
-                    bot.get_file(file_id=ob_event.file.id),
-                    timeout=10.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"获取文件信息超时 (file_id={ob_event.file.id})")
-                return ret_list
-            except Exception as e:
-                logger.warning(f"获取文件信息失败: {e}")
-                return ret_list
-            logger.debug(f"获取文件: {file_data}")
-            # TODO: 获取文件: {'file': '/app/.config/QQ/NapCat/temp/XXXXXX.csv', 'url': '/app/.config/QQ/NapCat/temp/XXXXXX.csv', 'file_size': '1079', 'file_name': 'XXXXXX.csv'}
-            # napcat 挂载目录 ${NEKRO_DATA_DIR}/napcat_data/QQ:/app/.config/QQ
-            target_file_path = str(Path(NAPCAT_TEMPFILE_DIR) / file_data["file_name"])
-            if Path(target_file_path).exists():
-                ret_list.append(
-                    await ChatMessageSegmentFile.create_form_local_path(
-                        local_path=target_file_path,
-                        from_chat_key=db_chat_channel.chat_key,
-                        file_name=file_data["file_name"],
-                    ),
-                )
+        try:
+            url = (ob_event.file.model_extra or {}).get("url", "")
+            if url.startswith(("https://", "http://")):
+                file = OneBotFile(url=url)
             else:
-                logger.warning(f"文件不存在: {target_file_path}")
-        else:
-            logger.debug(f"无法处理的文件消息: {ob_event.file}")
+                file = OneBotFile.model_validate(await asyncio.wait_for(
+                    bot.get_file(file_id=ob_event.file.id), timeout=30,
+                ))
+            ret_list.append(await ingest_onebot_file(
+                file, db_chat_channel.chat_key,
+                display_name=ob_event.file.name, expected_size=ob_event.file.size,
+                max_bytes=config.MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+            ))
+        except Exception as exc:
+            logger.warning(f"上传文件校验或下载失败: {exc}")
 
         return ret_list, False, ""
 
@@ -716,36 +644,16 @@ async def convert_chat_message(
                 )
 
         elif seg.type == "file":
-            if "size" in seg.data and seg.data["size"] > config.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-                file_name = seg.data.get("name", "unknown")
-                logger.warning(f"文件过大，跳过处理: {file_name}")
-                continue
-            if "url" in seg.data:
-                ret_list.append(
-                    await ChatMessageSegmentFile.create_from_url(
-                        url=seg.data["url"],
-                        from_chat_key=db_chat_channel.chat_key,
-                    ),
-                )
-            elif "file" in seg.data:
-                file_seg = await _build_file_segment_from_onebot_file(
-                    seg=seg,
-                    bot=bot,
-                    from_chat_key=db_chat_channel.chat_key,
-                )
-                if file_seg:
-                    ret_list.append(file_seg)
-                else:
-                    fallback_name = seg.data.get("name", "unknown")
-                    ret_list.append(
-                        ChatMessageSegment(
-                            type=ChatMessageSegmentType.TEXT,
-                            text=f"[文件: {fallback_name} (获取失败)]",
-                        ),
-                    )
+            file_seg = await _build_file_segment_from_onebot_file(
+                seg, bot, db_chat_channel.chat_key,
+            )
+            if file_seg:
+                ret_list.append(file_seg)
             else:
-                logger.warning(f"OneBot file message without url or file: {seg}")
-                continue
+                ret_list.append(ChatMessageSegment(
+                    type=ChatMessageSegmentType.TEXT,
+                    text=f"[文件: {seg.data.get('name') or seg.data.get('file') or 'unknown'} (获取失败)]",
+                ))
 
         elif seg.type == "forward":
             forward_id = seg.data.get("id", "")
