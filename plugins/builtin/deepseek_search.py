@@ -52,16 +52,12 @@ def _result(content: str, event: dict) -> TransientAgentResult:
     search_cost = event.get("search_cost_usd_estimate", 0)
     low = search_cost + event.get("model_cost_usd_estimate_min", 0)
     high = search_cost + event.get("model_cost_usd_estimate_max", 0)
+    cost = f"${low:.6f}–${high:.6f}" if event.get("event") == "complete" else "未知"
     audit = (
-        "DeepSeek 搜索与整理\n"
-        f"状态：{event['event']}\n"
-        f"结果数：{event.get('result_count', '未知')}\n"
-        f"搜索耗时：{event.get('search_ms', '未知')} ms\n"
-        f"搜索与整理总耗时：{event.get('total_ms', '未知')} ms\n"
-        f"DS 输入/输出 token：{event.get('prompt_tokens', '未知')} / {event.get('completion_tokens', '未知')}\n"
-        f"DS 费用估算：${low:.8f}–${high:.8f}（公开价，非账单；不含莉莉调用费用，失败时可能有未计量费用）\n"
-        "搜索正文与整理内容仅供当前任务使用，不写入聊天历史。\n"
-        + json.dumps(event, ensure_ascii=False, indent=2)
+        f"{content}\n\n"
+        f"耗时 {event.get('total_ms', event.get('search_ms', '未知'))} ms ｜ "
+        f"Token {event.get('prompt_tokens', '未知')}/{event.get('completion_tokens', '未知')}（入/出）｜ "
+        f"费用估算 {cost}"
     )
     return TransientAgentResult(content, audit)
 

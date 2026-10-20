@@ -101,8 +101,7 @@ async def test_pilot_scope_task_limit_and_daily_limit(tmp_path: Path, monkeypatc
         await search_plugin.deepseek_search(other, "query")
     result = await search_plugin.deepseek_search(pilot, "query")
     assert result.content == "evidence"
-    assert "DS 费用估算" in result.audit
-    assert "evidence" not in result.audit
+    assert result.audit == "evidence\n\n耗时 未知 ms ｜ Token 1/未知（入/出）｜ 费用估算 $0.000000–$0.000000"
     assert "已使用" in await search_plugin.deepseek_search(pilot, "again")
     assert "额度" in await search_plugin.deepseek_search(pilot.model_copy(update={"container_key": "task2"}), "query")
     search.assert_awaited_once()
