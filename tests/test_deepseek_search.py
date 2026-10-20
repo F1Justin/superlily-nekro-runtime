@@ -12,7 +12,7 @@ from nekro_agent.services.agent.deepseek_search import CHAT_URL, SEARCH_URL, sea
 from nekro_agent.services.message_service import message_service
 from nekro_agent.services.plugin.base import NekroPlugin
 from nekro_agent.services.plugin.collector import plugin_collector
-from nekro_agent.services.plugin.schema import SandboxMethodType
+from nekro_agent.services.plugin.schema import SandboxMethodType, TransientAgentResult
 from nekro_agent.services.rpc_service import dispatch_rpc_request
 from nekro_agent.services.sandbox import runner
 from nekro_agent.services.sandbox.rpc_grants import rpc_grants
@@ -98,7 +98,10 @@ async def test_pilot_scope_task_limit_and_daily_limit(tmp_path: Path, monkeypatc
     assert not await search_plugin.available_methods(other)
     with pytest.raises(PermissionError):
         await search_plugin.deepseek_search(other, "query")
-    assert await search_plugin.deepseek_search(pilot, "query") == "evidence"
+    result = await search_plugin.deepseek_search(pilot, "query")
+    assert result.content == "evidence"
+    assert "DS 费用估算" in result.audit
+    assert "evidence" not in result.audit
     assert "已使用" in await search_plugin.deepseek_search(pilot, "again")
     assert "额度" in await search_plugin.deepseek_search(pilot.model_copy(update={"container_key": "task2"}), "query")
     search.assert_awaited_once()
@@ -112,7 +115,7 @@ async def test_transient_agent_keeps_continuation_without_system_history() -> No
 
     @plugin.mount_sandbox_method(SandboxMethodType.AGENT, "test", persist_result=False)
     async def transient(ctx):
-        return "private evidence"
+        return TransientAgentResult("private evidence", "safe telemetry")
 
     token, grant = rpc_grants.issue(AgentCtx(from_chat_key="pilot"), {"transient": transient}, 60)
     try:
@@ -121,18 +124,21 @@ async def test_transient_agent_keeps_continuation_without_system_history() -> No
         assert result["result"] == "private evidence"
         assert grant.continuation_result == "private evidence"
         assert grant.transient_result
+        assert grant.continuation_audit == "safe telemetry"
         push.assert_not_awaited()
     finally:
         rpc_grants.revoke(token)
 
 
-async def test_transient_runner_redacts_diagnostics_and_execution_record(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("audit", ["", "DeepSeek search: safe telemetry"])
+async def test_transient_runner_redacts_diagnostics_and_execution_record(tmp_path: Path, monkeypatch, audit: str) -> None:
     from tests.test_superlily_runtime import FakeDocker
 
     token, grant = rpc_grants.issue(AgentCtx(from_chat_key="pilot"), {}, 60)
     grant.continuation = "agent"
     grant.continuation_result = "private evidence" * 100
     grant.transient_result = True
+    grant.continuation_audit = audit
     monkeypatch.setattr(runner, "HOST_SHARED_DIR", tmp_path / "shared")
     monkeypatch.setattr(runner, "USER_UPLOAD_DIR", tmp_path / "uploads")
     monkeypatch.setattr(runner.aiodocker, "Docker", FakeDocker)
@@ -145,7 +151,7 @@ async def test_transient_runner_redacts_diagnostics_and_execution_record(tmp_pat
     try:
         result = await runner.run_code_in_sandbox(SimpleNamespace(code_content="pass", thought_chain=""), "pilot", 10, task_id="d" * 32)
         assert result[0] == grant.continuation_result
-        assert create.call_args.kwargs["outputs"] == "[Transient agent result omitted]"
+        assert create.call_args.kwargs["outputs"] == (audit or "[Transient agent result omitted]")
         for path in (tmp_path / "shared").rglob("execution-*.txt"):
             assert "private evidence" not in path.read_text()
     finally:

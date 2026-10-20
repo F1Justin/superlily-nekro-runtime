@@ -326,7 +326,7 @@ async def _run_code_in_sandbox(
     total_time = generation_time_ms + exec_time
 
     transient_result = grant is not None and grant.transient_result
-    recorded_output = "[Transient agent result omitted]" if transient_result else output_text
+    recorded_output = (grant.continuation_audit or "[Transient agent result omitted]") if transient_result else output_text
     logger.debug(f"容器 {container_name} 输出: {limited_text_output(recorded_output)} | 退出类型: {stop_type}")
 
     output_name = f"execution-{workspace.epoch}.txt"

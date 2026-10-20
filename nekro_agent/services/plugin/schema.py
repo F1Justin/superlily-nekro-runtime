@@ -1,5 +1,12 @@
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Coroutine
+
+
+@dataclass(frozen=True)
+class TransientAgentResult:
+    content: str
+    audit: str
 
 
 class SandboxMethodType(str, Enum):

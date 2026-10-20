@@ -35,7 +35,7 @@ async def execute_rpc_method(method: Any, args: list[Any], kwargs: dict[str, Any
 async def dispatch_rpc_request(raw_body: bytes, grant: RPCGrant) -> dict[str, Any]:
     from nekro_agent.services.message_service import message_service
     from nekro_agent.services.plugin.collector import plugin_collector
-    from nekro_agent.services.plugin.schema import SandboxMethodType
+    from nekro_agent.services.plugin.schema import SandboxMethodType, TransientAgentResult
     from nekro_agent.services.plugin.utils import get_sandbox_method_type
 
     request = decode_rpc_request(raw_body)
@@ -62,6 +62,11 @@ async def dispatch_rpc_request(raw_body: bytes, grant: RPCGrant) -> dict[str, An
                 raise PermissionError("RPC target is outside the current conversation")
         method_type = get_sandbox_method_type(method=method)
         result, error = await execute_rpc_method(method, args, request.kwargs)
+        if isinstance(result, TransientAgentResult):
+            if method_type != SandboxMethodType.AGENT or getattr(method, "_persist_result", True):
+                raise ValueError("Transient results require a non-persisting AGENT method")
+            grant.continuation_audit = result.audit
+            result = result.content
         response = {"result": result, "error": error[:4096], "method_type": method_type.value}
         try:
             encode_rpc_value(response)

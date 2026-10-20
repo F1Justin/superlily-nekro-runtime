@@ -15,7 +15,7 @@ from nekro_agent.api.plugin import ConfigBase, NekroPlugin, SandboxMethodType
 from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.core.os_env import OsEnv
 from nekro_agent.services.agent.deepseek_search import search_and_digest
-from nekro_agent.services.plugin.schema import SandboxMethod
+from nekro_agent.services.plugin.schema import SandboxMethod, TransientAgentResult
 
 plugin = NekroPlugin(
     name="DeepSeek 搜索", module_name="deepseek_search", description="搜索网页并整理临时参考资料",
@@ -48,13 +48,31 @@ def _record(event: dict[str, object]) -> None:
         stream.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def _result(content: str, event: dict) -> TransientAgentResult:
+    search_cost = event.get("search_cost_usd_estimate", 0)
+    low = search_cost + event.get("model_cost_usd_estimate_min", 0)
+    high = search_cost + event.get("model_cost_usd_estimate_max", 0)
+    audit = (
+        "DeepSeek 搜索与整理\n"
+        f"状态：{event['event']}\n"
+        f"结果数：{event.get('result_count', '未知')}\n"
+        f"搜索耗时：{event.get('search_ms', '未知')} ms\n"
+        f"搜索与整理总耗时：{event.get('total_ms', '未知')} ms\n"
+        f"DS 输入/输出 token：{event.get('prompt_tokens', '未知')} / {event.get('completion_tokens', '未知')}\n"
+        f"DS 费用估算：${low:.8f}–${high:.8f}（公开价，非账单；不含莉莉调用费用，失败时可能有未计量费用）\n"
+        "搜索正文与整理内容仅供当前任务使用，不写入聊天历史。\n"
+        + json.dumps(event, ensure_ascii=False, indent=2)
+    )
+    return TransientAgentResult(content, audit)
+
+
 @plugin.mount_collect_methods()
 async def available_methods(_ctx: AgentCtx) -> list[SandboxMethod]:
     return plugin.sandbox_methods if _ctx.chat_key in config.ALLOWED_CHAT_KEYS else []
 
 
 @plugin.mount_sandbox_method(SandboxMethodType.AGENT, "搜索并整理网页资料", persist_result=False)
-async def deepseek_search(_ctx: AgentCtx, query: str) -> str:
+async def deepseek_search(_ctx: AgentCtx, query: str) -> str | TransientAgentResult:
     """deepseek_search(query: str) -> str
     搜索外部事实并返回 DS 整理的临时资料，随后继续按当前人格回复。
     query 为独立完整的问题（最多128字），只含查询所需信息；每次回复最多查询一次。
@@ -90,7 +108,9 @@ async def deepseek_search(_ctx: AgentCtx, query: str) -> str:
                 outcome = await search_and_digest(client, api_key, query, metrics)
     except (httpx.HTTPError, ValueError, TimeoutError) as exc:
         status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-        _record({**event_base, "event": "error", "error_type": type(exc).__name__, "http_status": status, **metrics})
-        return "搜索或资料整理失败，本次查询未核实。"
-    _record({**event_base, "event": "complete", **outcome.metrics})
-    return outcome.context
+        event = {**event_base, "event": "error", "error_type": type(exc).__name__, "http_status": status, **metrics}
+        _record(event)
+        return _result("搜索或资料整理失败，本次查询未核实。", event)
+    event = {**event_base, "event": "complete", **outcome.metrics}
+    _record(event)
+    return _result(outcome.context, event)

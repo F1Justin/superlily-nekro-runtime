@@ -20,6 +20,7 @@ class RPCGrant:
     continuation: str = ""
     continuation_result: Any = None
     transient_result: bool = False
+    continuation_audit: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
