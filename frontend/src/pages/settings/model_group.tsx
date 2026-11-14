@@ -145,22 +145,29 @@ function EditDialog({
 
   const fetchAvailableModels = async () => {
     if (!config.BASE_URL || !config.API_KEY) return
-    const url = buildModelsUrl(config.BASE_URL)
+    const baseUrl = config.BASE_URL.trim()
+    const isCloudflareGateway =
+      /^https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/[^/]+\/ai\/v1\/?$/i.test(baseUrl) ||
+      /^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/compat\/?$/i.test(baseUrl)
     setFetchingModels(true)
     try {
-      const resp = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${config.API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      })
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`)
+      let models: string[]
+      if (isCloudflareGateway) {
+        models = await unifiedConfigApi.fetchModels({
+          base_url: baseUrl,
+          api_key: config.API_KEY,
+          proxy_url: config.CHAT_PROXY || undefined,
+        })
+      } else {
+        const response = await fetch(buildModelsUrl(baseUrl), {
+          headers: {
+            Authorization: `Bearer ${config.API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        models = parseModelIds(await response.json())
       }
-      const data: OpenAIModelListResponse = await resp.json()
-      const models = parseModelIds(data)
-      setModelOptions(models)
       setModelOptions(models)
       if (models.length > 0) {
         notification.success(t('modelGroup.validation.fetchSuccess', { count: models.length }))

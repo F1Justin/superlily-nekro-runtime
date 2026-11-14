@@ -17,7 +17,7 @@ from nekro_agent.schemas.chat_message import ChatMessage
 from nekro_agent.services.plugin.collector import plugin_collector
 from nekro_agent.services.sandbox.runner import limited_run_code
 
-from .cache_policy import uses_argon_implicit_cache
+from .cache_policy import uses_stable_history_cache
 from .creator import OpenAIChatMessage
 from .egress_client import EgressClient, is_egress_failure
 from .openai import OpenAIResponse, gen_openai_chat_response
@@ -133,7 +133,7 @@ async def run_agent(
         plugins_prompt=rendered_plugins.system_prompt,
         plugins_runtime_prompt=rendered_plugins.runtime_prompt,
         enable_cot=used_model_group.ENABLE_COT,
-        cacheable_history=uses_argon_implicit_cache(used_model_group.CHAT_MODEL, used_model_group.BASE_URL),
+        cacheable_history=uses_stable_history_cache(used_model_group.CHAT_MODEL, used_model_group.BASE_URL),
     )
 
     messages = [prompt_compiler.render_system_message()]

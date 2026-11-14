@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from nekro_agent.core import config, logger
 
 from .cache_policy import uses_argon_implicit_cache
 from .creator import OpenAIChatMessage
+from .usage_accounting import UsageAccounting, derive_usage_accounting
 
 _OPENAI_BASE_URL = "https://api.openai.com/v1"
 
@@ -161,7 +163,7 @@ def derive_web_search_observation(
     return web_search_requests, inferred_requests, web_search_observed, observation_source
 
 
-class OpenAIResponse(BaseModel):
+class OpenAIResponse(UsageAccounting):
     response_content: str  # 最终的回复内容
     thought_chain: str  # 思考链
     messages: List[Dict[str, Any]]  # 原始消息列表
@@ -190,15 +192,18 @@ class OpenAIResponse(BaseModel):
 
     def gen_log(self, lang: str = "zh") -> str:
         """生成日志"""
+        cost = str(self.usage_cost) if self.usage_cost_reported else ("未返回" if lang == "zh" else "not reported")
         if lang == "zh":
             return (
                 f"[OpenAI{'-Stream' if self.stream_mode else ''}] 使用模型: {self.use_model}\n"
                 f"总 token 消耗: {self.token_consumption}\n"
                 f"输入 token: {self.token_input}\n"
                 f"输出 token: {self.token_output}\n"
+                f"推理 token: {self.token_reasoning} ({self.token_reasoning_source})\n"
                 f"缓存读取 token: {self.token_cached}\n"
                 f"缓存写入 token: {self.token_cache_write}\n"
-                f"实际费用: {self.usage_cost}\n"
+                f"供应商费用: {cost}\n"
+                f"费用估算 (USD): {self.estimated_cost_usd}\n"
                 f"网页搜索已提供: {self.web_search_offered}\n"
                 f"供应商报告的网页搜索请求: {self.web_search_requests}\n"
                 f"推断的网页搜索请求: {self.web_search_inferred_requests}\n"
@@ -214,9 +219,11 @@ class OpenAIResponse(BaseModel):
             f"Total token consumption: {self.token_consumption}\n"
             f"Input token: {self.token_input}\n"
             f"Output token: {self.token_output}\n"
+            f"Reasoning token: {self.token_reasoning} ({self.token_reasoning_source})\n"
             f"Cached token: {self.token_cached}\n"
             f"Cache write token: {self.token_cache_write}\n"
-            f"Actual cost: {self.usage_cost}\n"
+            f"Provider cost: {cost}\n"
+            f"Estimated cost (USD): {self.estimated_cost_usd}\n"
             f"Web search offered: {self.web_search_offered}\n"
             f"Provider-reported web search requests: {self.web_search_requests}\n"
             f"Inferred web search requests: {self.web_search_inferred_requests}\n"
@@ -256,6 +263,7 @@ class OpenAIResponse(BaseModel):
                 "token_cache_write": self.token_cache_write,
                 "usage_cost": self.usage_cost,
                 "cache_discount": self.cache_discount,
+                **self.model_dump(include=set(UsageAccounting.model_fields)),
                 "server_tool_use": self.server_tool_use,
                 "web_search_offered": self.web_search_offered,
                 "web_search_requests": self.web_search_requests,
@@ -500,6 +508,12 @@ def _create_http_client(
             request.headers["X-Title"] = _OPENROUTER_APP_TITLE
             request.headers["HTTP-Referer"] = _OPENROUTER_APP_REFERER
 
+    async def log_cloudflare_request(response: httpx.Response) -> None:
+        if response.request.headers.get("cf-aig-collect-log") == "true":
+            log_id = response.headers.get("cf-aig-log-id")
+            if log_id:
+                logger.info(f"Cloudflare AI Gateway log_id={log_id} status={response.status_code}")
+
     return httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=connect_timeout,
@@ -508,7 +522,7 @@ def _create_http_client(
             pool=pool_timeout,
         ),
         proxies={"http://": proxy_url, "https://": proxy_url} if proxy_url else None,
-        event_hooks={"request": [enforce_headers]},
+        event_hooks={"request": [enforce_headers], "response": [log_cloudflare_request]},
     )
 
 
@@ -529,6 +543,42 @@ def _extract_model_ids(payload: Dict[str, Any]) -> List[str]:
     return sorted(set([*pick(payload.get("data")), *pick(payload.get("models"))]))
 
 
+class _CloudflareCatalogModel(BaseModel):
+    model_id: str
+    request_formats: Optional[List[str]] = None
+
+
+class _CloudflareCatalogPagination(BaseModel):
+    total_count: int
+    per_page: int = Field(gt=0)
+
+
+class _CloudflareCatalogPage(BaseModel):
+    success: bool
+    result: List[_CloudflareCatalogModel]
+    result_info: _CloudflareCatalogPagination
+
+
+async def _list_cloudflare_chat_models(
+    client: httpx.AsyncClient,
+    catalog_url: str,
+    headers: Dict[str, str],
+) -> List[str]:
+    # REST 支持 OpenAI 聊天接口，但其模型目录由 Cloudflare 控制台使用的另一个接口提供。
+    models: set[str] = set()
+    page_number = 1
+    while True:
+        response = await client.get(catalog_url, headers=headers, params={"page": page_number, "per_page": 100})
+        response.raise_for_status()
+        page = _CloudflareCatalogPage.model_validate(response.json())
+        if not page.success:
+            raise ValueError("Cloudflare 模型目录请求失败")
+        models.update(model.model_id for model in page.result if "chat-completions" in (model.request_formats or []))
+        if not page.result or page_number * page.result_info.per_page >= page.result_info.total_count:
+            return sorted(models)
+        page_number += 1
+
+
 async def list_openai_models(
     *,
     base_url: str,
@@ -538,10 +588,17 @@ async def list_openai_models(
     """通过服务端真实网络出口拉取 OpenAI 兼容模型列表。"""
 
     normalized_base_url = base_url.strip().rstrip("/")
-    models_url = f"{normalized_base_url}/models"
+    base = urlparse(normalized_base_url)
+    cloudflare_rest = base.scheme == "https" and base.hostname == "api.cloudflare.com" and re.fullmatch(
+        r"/client/v4/accounts/[^/]+/ai/v1", base.path,
+    )
+    cloudflare_compat = base.scheme == "https" and base.hostname == "gateway.ai.cloudflare.com" and re.fullmatch(
+        r"/v1/[^/]+/[^/]+/compat", base.path,
+    )
     headers = {"Content-Type": "application/json"}
     if api_key and api_key.strip():
-        headers["Authorization"] = f"Bearer {api_key.strip()}"
+        auth_header = "cf-aig-authorization" if cloudflare_compat else "Authorization"
+        headers[auth_header] = f"Bearer {api_key.strip()}"
 
     async with _create_http_client(
         proxy_url=proxy_url,
@@ -550,7 +607,10 @@ async def list_openai_models(
         connect_timeout=10,
         pool_timeout=10,
     ) as client:
-        response = await client.get(models_url, headers=headers)
+        if cloudflare_rest:
+            catalog_url = base._replace(path=f"{base.path.removesuffix('/v1')}/catalog/models", query="", fragment="").geturl()
+            return await _list_cloudflare_chat_models(client, catalog_url, headers)
+        response = await client.get(f"{normalized_base_url}/models", headers=headers)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -613,6 +673,20 @@ async def gen_openai_chat_response(
         session_id=session_id,
         enable_web_search=enable_openrouter_web_search,
     )
+    extra_headers: Dict[str, str] = {}
+    if normalized_host == "api.cloudflare.com" and extra_body and "cf-aig-gateway-id" in extra_body:
+        gateway_id = extra_body.pop("cf-aig-gateway-id")
+        if not isinstance(gateway_id, str) or not gateway_id.strip():
+            raise ValueError("cf-aig-gateway-id 必须是非空字符串")
+        extra_headers["cf-aig-gateway-id"] = gateway_id.strip()
+    if normalized_host in {"api.cloudflare.com", "gateway.ai.cloudflare.com"} and extra_body:
+        for name in ("cf-aig-collect-log", "cf-aig-collect-log-payload"):
+            if name not in extra_body:
+                continue
+            value = extra_body.pop(name)
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} 必须是 JSON 布尔值")
+            extra_headers[name] = "true" if value else "false"
 
     gen_kwargs = {
         "temperature": temperature,
@@ -622,6 +696,7 @@ async def gen_openai_chat_response(
         "max_tokens": max_tokens,
         "stop": stop_words,
         "extra_body": dict(extra_body) if extra_body else None,
+        "extra_headers": extra_headers or None,
     }
 
     if top_k is not None:
@@ -640,6 +715,9 @@ async def gen_openai_chat_response(
     token_cached: int = 0
     token_cache_write: int = 0
     usage_cost: float = 0
+    usage_cost_reported = False
+    reasoning_tokens_reported: Optional[int] = None
+    audio_input_tokens = 0
     cache_discount: float = 0
     server_tool_use: Dict[str, int] = {}
     web_search_requests: Optional[int] = None
@@ -663,6 +741,7 @@ async def gen_openai_chat_response(
     def _apply_usage(usage: Any) -> None:
         nonlocal token_consumption, token_input, token_output, token_cached, token_cache_write
         nonlocal usage_cost, cache_discount, server_tool_use, web_search_requests
+        nonlocal usage_cost_reported, reasoning_tokens_reported, audio_input_tokens
         if not usage:
             return
         token_consumption = int(_response_value(usage, "total_tokens", token_consumption) or 0)
@@ -671,6 +750,13 @@ async def gen_openai_chat_response(
         prompt_details = _response_value(usage, "prompt_tokens_details", None)
         token_cached = int(_response_value(prompt_details, "cached_tokens", token_cached) or 0)
         token_cache_write = int(_response_value(prompt_details, "cache_write_tokens", token_cache_write) or 0)
+        audio_input_tokens = int(_response_value(prompt_details, "audio_tokens", audio_input_tokens) or 0)
+        completion_details = _response_value(usage, "completion_tokens_details", None)
+        reasoning = _response_value(completion_details, "reasoning_tokens", None)
+        if reasoning is not None:
+            reasoning_tokens_reported = int(reasoning)
+        if _response_value(usage, "cost", None) is not None:
+            usage_cost_reported = True
         usage_cost = float(_response_value(usage, "cost", usage_cost) or 0)
         cache_discount = float(_response_value(usage, "cache_discount", cache_discount) or 0)
         raw_server_tool_use = _response_value(usage, "server_tool_use", {}) or {}
@@ -835,6 +921,12 @@ async def gen_openai_chat_response(
         _first_token_cost_ms = int((first_token_time - _start_time) * 1000)
 
     response = OpenAIResponse(
+        **derive_usage_accounting(
+            model=model, base_url=base_url or "", token_input=token_input, token_output=token_output,
+            token_consumption=token_consumption, token_cached=token_cached,
+            reasoning_tokens=reasoning_tokens_reported, usage_cost_reported=usage_cost_reported,
+            audio_input_tokens=audio_input_tokens,
+        ).model_dump(),
         response_content=output,
         thought_chain=thought_chain,
         messages=messages,

@@ -1,11 +1,12 @@
 import json
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from nekro_agent.services.agent.openai import OpenAIResponse
+from nekro_agent.services.agent.usage_accounting import UsageAccounting
 
 
-class SandboxCodeExtData(BaseModel):
+class SandboxCodeExtData(UsageAccounting):
     message_cnt: int
     token_consumption: int
     token_input: int
@@ -65,6 +66,7 @@ class SandboxCodeExtData(BaseModel):
         chars_count_total = chars_count_input + chars_count_output
 
         return cls(
+            **llm_response.model_dump(include=set(UsageAccounting.model_fields)),
             message_cnt=llm_response.message_cnt,
             token_consumption=llm_response.token_consumption,
             token_input=llm_response.token_input,

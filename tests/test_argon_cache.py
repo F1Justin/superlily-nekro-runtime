@@ -11,7 +11,11 @@ from jinja2 import Environment, FileSystemLoader
 from nekro_agent.core.config import CoreConfig, ModelConfigGroup
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
-from nekro_agent.services.agent.cache_policy import render_cacheable_history, uses_argon_implicit_cache
+from nekro_agent.services.agent.cache_policy import (
+    render_cacheable_history,
+    uses_argon_implicit_cache,
+    uses_stable_history_cache,
+)
 from nekro_agent.services.agent.creator import OpenAIChatMessage
 from nekro_agent.services.agent.openai import gen_openai_chat_response
 from nekro_agent.services.agent.templates.compiler import PromptCompiler
@@ -63,8 +67,9 @@ def _message(number: int, text: str = "historical text") -> DBChatMessage:
 async def _render(
     model: str, nonce: str, clock: str, plugin_text: str, records: list[DBChatMessage],
     focus: ReplyFocus | None = None,
+    base_url: str = "https://openrouter.ai/api/v1",
 ) -> OpenAIChatMessage:
-    model_group = ModelConfigGroup(CHAT_MODEL=model, BASE_URL="https://openrouter.ai/api/v1")
+    model_group = ModelConfigGroup(CHAT_MODEL=model, BASE_URL=base_url)
     config = CoreConfig(
         AI_CHAT_CONTEXT_MAX_LENGTH=16, AI_CONTEXT_LENGTH_PER_SESSION=3200,
         AI_CONTEXT_LENGTH_PER_MESSAGE=1024, AI_VISION_IMAGE_LIMIT=0, AI_VISION_REPLY_IMAGE_LIMIT=1,
@@ -72,7 +77,7 @@ async def _render(
     compiler = PromptCompiler(
         platform_name="QQ", bot_platform_id="bot", chat_preset="persona", plugins_prompt="",
         plugins_runtime_prompt=plugin_text, enable_cot=False,
-        cacheable_history=uses_argon_implicit_cache(model, model_group.BASE_URL),
+        cacheable_history=uses_stable_history_cache(model, model_group.BASE_URL),
     )
     query = Mock()
     query.order_by.return_value.limit = AsyncMock(return_value=list(reversed(records)))
@@ -96,11 +101,16 @@ async def _render(
 
 
 @pytest.mark.asyncio
-async def test_argon_history_survives_clock_nonce_plugin_and_focus_changes() -> None:
+@pytest.mark.parametrize(("model", "base_url"), [
+    ("google/gemini-4-argon", "https://openrouter.ai/api/v1"),
+    ("google-ai-studio/gemini-3-flash-preview", "https://gateway.ai.cloudflare.com/v1/account/group/compat"),
+    ("google/gemini-3-flash", "https://api.cloudflare.com/client/v4/accounts/account/ai/v1"),
+])
+async def test_cacheable_history_survives_clock_nonce_plugin_and_focus_changes(model: str, base_url: str) -> None:
     records = [_message(1), _message(2)]
     focus = ReplyFocus(_message(9, "current question"), _message(8, "quoted question"), "8")
-    a = await _render("google/gemini-4-argon", "nonce-a", "clock-a", "plugin-a", records)
-    b = await _render("google/gemini-4-argon", "nonce-b", "clock-b", "plugin-b", records, focus)
+    a = await _render(model, "nonce-a", "clock-a", "plugin-a", records, base_url=base_url)
+    b = await _render(model, "nonce-b", "clock-b", "plugin-b", records, focus, base_url=base_url)
     first, second = (m.to_dict()["content"] for m in (a, b))
     boundary = "</nekro_history_json>"
     assert first.split(boundary)[0] == second.split(boundary)[0]
@@ -115,13 +125,18 @@ async def test_argon_history_survives_clock_nonce_plugin_and_focus_changes() -> 
 
 
 @pytest.mark.asyncio
-async def test_new_record_only_changes_suffix_and_existing_limits_still_apply() -> None:
-    records = [_message(1, "first"), _message(2, "second")]
-    a = (await _render("google/gemini-4-argon", "nonce-a", "a", "", records)).to_dicts()
-    b = (await _render("google/gemini-4-argon", "nonce-b", "b", "", [*records, _message(3, "third")])).to_dicts()
+@pytest.mark.parametrize(("model", "base_url"), [
+    ("google/gemini-4-argon", "https://openrouter.ai/api/v1"),
+    ("google-ai-studio/gemini-3-flash-preview", "https://gateway.ai.cloudflare.com/v1/account/group/compat"),
+    ("google/gemini-3-flash", "https://api.cloudflare.com/client/v4/accounts/account/ai/v1"),
+])
+async def test_new_record_only_changes_suffix_and_existing_limits_still_apply(model: str, base_url: str) -> None:
+    records = [_message(1, "first"), _message(2, "second"), _message(3, "third"), _message(4, "fourth")]
+    a = (await _render(model, "nonce-a", "a", "", records, base_url=base_url)).to_dicts()
+    b = (await _render(model, "nonce-b", "b", "", [*records, _message(5, "fifth")], base_url=base_url)).to_dicts()
     assert a[:-1] == b[:len(a) - 1]
     many = [_message(i, f"record-{i} " + "x" * 200) for i in range(1, 41)]
-    rendered = (await _render("google/gemini-4-argon", "nonce", "clock", "", many)).to_dicts()
+    rendered = (await _render(model, "nonce", "clock", "", many, base_url=base_url)).to_dicts()
     selected = []
     for part in rendered[:-1]:
         if part["role"] == "assistant":

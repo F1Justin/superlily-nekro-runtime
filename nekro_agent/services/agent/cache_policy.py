@@ -13,6 +13,18 @@ def uses_argon_implicit_cache(model: str, base_url: str) -> bool:
     )
 
 
+def uses_cloudflare_gemini_cache(model: str, base_url: str) -> bool:
+    host = urlparse(base_url).hostname
+    return (host, model) in (
+        ("gateway.ai.cloudflare.com", "google-ai-studio/gemini-3-flash-preview"),
+        ("api.cloudflare.com", "google/gemini-3-flash"),
+    )
+
+
+def uses_stable_history_cache(model: str, base_url: str) -> bool:
+    return uses_argon_implicit_cache(model, base_url) or uses_cloudflare_gemini_cache(model, base_url)
+
+
 def render_cacheable_history(records: Sequence[str], *, include_instructions: bool = True) -> str:
     """Quote historical text as data; generated per-run delimiters belong in the tail."""
     encoded = json.dumps(list(records), ensure_ascii=False, separators=(",", ":"))
