@@ -6,6 +6,8 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+import json5
+
 from nekro_agent.core.config import CoreConfig, ModelConfigGroup
 from nekro_agent.core.logger import logger
 from nekro_agent.core.os_env import OsEnv
@@ -23,16 +25,20 @@ async def fill_missing_descriptions(messages: list[DBChatMessage], model: ModelC
         if str(message.sender_id) != "-1" or not message.message_id:
             continue
         original = message.content_data
-        parts = json.loads(original)
+        parts = json5.loads(original)
         changed = False
         for part in parts:
             if part.get("type") != "image" or part.get("text") or not part.get("file_name"):
                 continue
-            index = Path(OsEnv.DATA_DIR) / "plugin_data/Superlily.core_bridge/render-history.sqlite3"
+            index = Path(OsEnv.DATA_DIR).resolve() / "plugin_data/Superlily.core_bridge/render-history.sqlite3"
             if index.is_file():
-                with closing(sqlite3.connect(f"{index.as_uri()}?mode=ro", uri=True)) as db:
-                    match = db.execute("SELECT body FROM transcripts WHERE chat=? AND message=? AND filename=?",
-                                       (message.chat_key, message.message_id, part["file_name"])).fetchone()
+                try:
+                    with closing(sqlite3.connect(f"{index.as_uri()}?mode=ro", uri=True)) as db:
+                        match = db.execute("SELECT body FROM transcripts WHERE chat=? AND message=? AND filename=?",
+                                           (message.chat_key, message.message_id, part["file_name"])).fetchone()
+                except sqlite3.Error as exc:
+                    logger.warning(f"历史图片索引不可用 ({type(exc).__name__})")
+                    match = None
                 if match:
                     part["text"] = match[0]
                     changed = True

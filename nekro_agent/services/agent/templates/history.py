@@ -748,7 +748,7 @@ async def render_history_data(
         reserved_messages,
     )
 
-    if chat_key == "onebot_v11-group_1080353942" and model_group.ENABLE_VISION:
+    if model_group.ENABLE_VISION and chat_key in {"onebot_v11-group_1080353942", "onebot_v11-group_861651713"}:
         from .image_history import fill_missing_descriptions
 
         await fill_missing_descriptions([*reserved_messages, *recent_chat_messages], model_group, config)
