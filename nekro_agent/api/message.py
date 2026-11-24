@@ -116,6 +116,7 @@ async def send_image(
     image_path: str,
     ctx: AgentCtx,
     *,
+    history_text: str = "",
     record: bool = True,
     ref_msg_id: Optional[str] = None,
 ) -> None:
@@ -138,7 +139,7 @@ async def send_image(
         send_image(chat_key, "/path/to/temp.jpg", ctx, record=False)
         ```
     """
-    message_ = [AgentMessageSegment(type=AgentMessageSegmentType.IMAGE, content=image_path)]
+    message_ = [AgentMessageSegment(type=AgentMessageSegmentType.IMAGE, content=image_path, history_text=history_text)]
     try:
         adapter = await adapter_utils.get_adapter_for_ctx(ctx)
         await universal_chat_service.send_agent_message(chat_key, message_, adapter, ctx, record=record, ref_msg_id=ref_msg_id)

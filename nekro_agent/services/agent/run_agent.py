@@ -139,8 +139,10 @@ async def run_agent(
     messages = [prompt_compiler.render_system_message()]
     messages.extend(prompt_compiler.render_practice_messages(adapter_dialog_examples, adapter_jinja_env))
     focus_message_id, focus_reference_message_id = _get_reply_focus_ids(chat_message)
+    visible_conversation = ctx.start_visible_conversation(focus_message_id)
     messages.append(
         await prompt_compiler.render_history_message(
+            visible_conversation=visible_conversation,
             chat_key=chat_key,
             db_chat_channel=db_chat_channel,
             one_time_code=one_time_code,
@@ -300,6 +302,7 @@ async def run_agent(
                 db_chat_channel=db_chat_channel,
                 one_time_code=one_time_code,
                 plugin_injected_prompt=rendered_plugins.runtime_prompt,
+                visible_conversation=visible_conversation,
                 record_sta_timestamp=history_render_until_time,
                 model_group=used_model_group,
                 config=config,
