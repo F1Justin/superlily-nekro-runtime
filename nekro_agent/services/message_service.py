@@ -527,7 +527,7 @@ class MessageService:
                         content_data.append(
                             {
                                 "type": "image",
-                                "text": "",
+                                "text": msg.history_text,
                                 "file_name": file_name,
                                 "local_path": local_path,
                                 "remote_url": "",

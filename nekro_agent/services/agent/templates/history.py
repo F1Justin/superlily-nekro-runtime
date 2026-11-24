@@ -575,6 +575,10 @@ def _render_reply_focus_prompt(reply_focus: ReplyFocus, one_time_code: str, conf
             config=config,
         )
     )
+    if reply_focus.referenced_message and str(reply_focus.referenced_message.sender_id) == "-1":
+        for image in _message_images(reply_focus.referenced_message):
+            if image.text and image.text not in quoted_prompt:
+                quoted_prompt += "\n" + image.text
     trigger_prompt = reply_focus.trigger_message.parse_chat_history_prompt(one_time_code, config, ref_mode=True)
     return (
         "Reply Focus (authoritative context for the current request):\n"
@@ -590,15 +594,21 @@ def _message_images(message: DBChatMessage) -> List[ChatMessageSegmentImage]:
 
 def _reply_snapshot_images(reply_focus: ReplyFocus) -> List[ChatMessageSegmentImage]:
     if reply_focus.referenced_message:
-        return _message_images(reply_focus.referenced_message)
+        images = _message_images(reply_focus.referenced_message)
+        if images and (not reply_focus.trigger_message.ext_data_obj.ref_content_data or all(
+            (image.local_path and convert_filename_to_access_path(image.file_name, reply_focus.trigger_message.chat_key).is_file())
+            or (not image.local_path and image.remote_url) for image in images
+        )):
+            return images
     try:
-        return [
+        snapshot = [
             segment
             for segment in segments_from_list(reply_focus.trigger_message.ext_data_obj.ref_content_data)
             if isinstance(segment, ChatMessageSegmentImage)
         ]
+        return snapshot or (_message_images(reply_focus.referenced_message) if reply_focus.referenced_message else [])
     except (KeyError, TypeError, ValueError, ValidationError):
-        return []
+        return _message_images(reply_focus.referenced_message) if reply_focus.referenced_message else []
 
 
 def _select_history_images(
@@ -612,6 +622,8 @@ def _select_history_images(
     seen: Set[str] = set()
 
     def append_unique(images: List[ChatMessageSegmentImage], source: str, limit: int) -> None:
+        if limit <= 0:
+            return
         added = 0
         for image in images:
             key = image.file_name or image.remote_url or image.local_path or repr(image)
@@ -678,6 +690,7 @@ async def render_history_data(
     config: CoreConfig,
     plugin_injected_prompt: str = "",
     record_sta_timestamp: Optional[float] = None,
+    visible_conversation: Optional[list[dict[str, Any]]] = None,
     model_group: Optional[ModelConfigGroup] = None,
     focus_message_id: Optional[str] = None,
     focus_reference_message_id: Optional[str] = None,
@@ -732,6 +745,11 @@ async def render_history_data(
         reserved_messages,
     )
 
+    if model_group.ENABLE_VISION and chat_key in {"onebot_v11-group_1080353942", "onebot_v11-group_861651713"}:
+        from .image_history import fill_missing_descriptions
+
+        await fill_missing_descriptions([*reserved_messages, *recent_chat_messages], model_group, config)
+
     # 预先构建包含 plugin_injected_prompt 的基础消息，无论是否有历史记录都需要保留注入提示词
     base_message: OpenAIChatMessage = OpenAIChatMessage.from_template(
         "user",
@@ -763,6 +781,10 @@ async def render_history_data(
                 access_path = convert_filename_to_access_path(seg.file_name, chat_key)
                 if not access_path.exists():
                     logger.warning(f"图片不存在: {access_path}")
+                    if source == "reply_focus" and seg.remote_url:
+                        img_seg_set.add(seg.file_name)
+                        img_seg_pairs.append((f"<{one_time_code} | Image:{convert_filename_to_sandbox_upload_path(seg.file_name)}>",
+                                              ContentSegment.image_content(seg.remote_url), source))
                     continue
                 img_seg_set.add(seg.file_name)
                 # 检查图片大小
@@ -897,6 +919,17 @@ async def render_history_data(
             break
         total_length += prompt_length
     chat_history_prompts = chat_history_prompts[start_idx:]
+    if visible_conversation is not None:
+        # Capture only the actual selected records and pixels. Plugin prompts, RPC grants,
+        # memory internals and execution instructions do not belong in a delegated question.
+        for record in chat_history_prompts:
+            visible_conversation.append({"type": "input_text", "text": record.replace(one_time_code + " | ", "")})
+        if reply_focus:
+            focus = _render_reply_focus_prompt(reply_focus, one_time_code, config)
+            visible_conversation.append({"type": "input_text", "text": focus.replace(one_time_code + " | ", "")})
+        for label, pixels, source in img_seg_pairs:
+            visible_conversation.append({"type": "input_text", "text": source + " " + label.replace(one_time_code + " | ", "")})
+            visible_conversation.append({"type": "input_image", "image_url": pixels["image_url"]["url"]})
 
     chat_history_prompt = f"\n<{one_time_code} | message separator>\n".join(chat_history_prompts)
     chat_history_prompt += f"\n<{one_time_code} | message separator>\n"

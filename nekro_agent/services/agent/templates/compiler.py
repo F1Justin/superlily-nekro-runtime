@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from jinja2 import Environment
 
@@ -102,6 +102,7 @@ class PromptCompiler:
         one_time_code: str,
         config: CoreConfig,
         model_group: ModelConfigGroup,
+        visible_conversation: Optional[list[dict[str, Any]]] = None,
         focus_message_id: Optional[str] = None,
         focus_reference_message_id: Optional[str] = None,
     ) -> OpenAIChatMessage:
@@ -115,6 +116,7 @@ class PromptCompiler:
                 plugin_injected_prompt=self.plugins_runtime_prompt,
                 model_group=model_group,
                 config=config,
+                visible_conversation=visible_conversation,
                 focus_message_id=focus_message_id,
                 focus_reference_message_id=focus_reference_message_id,
             ),

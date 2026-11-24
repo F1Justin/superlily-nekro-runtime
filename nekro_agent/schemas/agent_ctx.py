@@ -64,6 +64,23 @@ class AgentCtx(BaseModel):
         default=None,
         description="当前聊天频道所使用的适配器标识，例如 `onebot_v11` 等。",
     )
+    # Private host-side data copied into this turn's RPC grant, never serialized to sandbox code.
+    _visible_conversation: Optional[list[dict[str, Any]]] = None
+    _origin_message_id: Optional[str] = None
+
+    @property
+    def visible_conversation(self) -> list[dict[str, Any]]:
+        return self._visible_conversation or []
+
+    @property
+    def origin_message_id(self) -> Optional[str]:
+        return self._origin_message_id
+
+    def start_visible_conversation(self, message_id: Optional[str]) -> list[dict[str, Any]]:
+        self._origin_message_id = message_id
+        self._visible_conversation = []
+        return self._visible_conversation
+
     _db_chat_channel: Optional["DBChatChannel"] = (
         None  # 当前聊天频道的数据库聊天频道实例
     )

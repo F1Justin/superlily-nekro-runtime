@@ -112,6 +112,8 @@ def convert_raw_msg_data_json_to_msg_prompt(json_data: str, one_time_code: str, 
                 if travel_mode
                 else f"<{one_time_code} | Image:{convert_filename_to_sandbox_upload_path(seg.file_name)}{remote_url_seg}>"
             )
+            if seg.text:
+                prompt_str += f"\n{seg.text}\n"
         elif isinstance(seg, ChatMessageSegmentFile):
             remote_url_seg = f' (remote_url:"{seg.remote_url}")' if seg.remote_url and config.AI_SHOW_REMOTE_URL else ""
             prompt_str += (

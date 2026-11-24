@@ -29,6 +29,7 @@ class AgentMessageSegment(BaseModel):
 
     type: AgentMessageSegmentType = AgentMessageSegmentType.TEXT
     content: str
+    history_text: str = ""
 
     class Config:
         use_enum_values = True
